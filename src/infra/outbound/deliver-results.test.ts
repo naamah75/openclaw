@@ -11,7 +11,10 @@ import type { OutboundDeliveryResult } from "./deliver-types.js";
 import type { DeliveryPlacementEvidence } from "./delivery-placement-evidence.types.js";
 import { createUnmodifiedPreparedOutboundBatch } from "./prepared-batch.js";
 
-vi.mock("./deliver-channel.js", () => ({ createChannelHandler: vi.fn() }));
+vi.mock("./deliver-channel.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./deliver-channel.js")>()),
+  createChannelHandler: vi.fn(),
+}));
 
 beforeEach(() => {
   vi.mocked(createChannelHandler).mockReset();
