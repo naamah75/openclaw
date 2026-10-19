@@ -8,6 +8,7 @@ import {
   acpMocks,
   createDispatcher,
   emptyConfig,
+  hookMocks,
   mocks,
   sessionStoreMocks,
   ttsMocks,
@@ -37,11 +38,13 @@ export function registerDurableBlockRoutingTests(): void {
       OriginatingTo: "imessage:+15550001111",
     });
     const replyResolver = async (_ctx: MsgContext, opts?: GetReplyOptions) => {
+      expect(opts?.suppressTyping).toBe(true);
+      expect(opts?.typingPolicy).toBe("internal_webchat");
       await requireBlockReplyHandler(opts?.onBlockReply)(
         { text: "Private dashboard update" },
         { deliveryIntentId: "block-reply:v1:codex-app-server:thread-1:turn-1:private" },
       );
-      return undefined;
+      return { text: "Private dashboard final" };
     };
 
     await dispatchReplyFromConfig({
@@ -53,9 +56,10 @@ export function registerDurableBlockRoutingTests(): void {
 
     expect(mocks.routeReply).not.toHaveBeenCalled();
     expect(dispatcher.sendBlockReply).toHaveBeenCalledWith({ text: "Private dashboard update" });
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledWith({ text: "Private dashboard final" });
   });
 
-  it("never lets a durable block intent deliver directly from a parent-owned background session", async () => {
+  it.each(["telegram", "discord"])("keeps parent-owned %s replies private", async (provider) => {
     setNoAbort();
     mocks.routeReply.mockClear();
     installThreadingTestPlugin({ id: "telegram" });
@@ -87,8 +91,8 @@ export function registerDurableBlockRoutingTests(): void {
 
     await dispatchReplyFromConfig({
       ctx: buildTestCtx({
-        Provider: "telegram",
-        Surface: "telegram",
+        Provider: provider,
+        Surface: provider,
         SessionKey: "agent:main:background-child",
         OriginatingChannel: "telegram",
         OriginatingTo: "telegram:999",
@@ -100,6 +104,15 @@ export function registerDurableBlockRoutingTests(): void {
 
     expect(mocks.routeReply).not.toHaveBeenCalled();
     expect(dispatcher.sendBlockReply).not.toHaveBeenCalled();
+    expect(dispatcher.sendFinalReply).not.toHaveBeenCalled();
+    expect(hookMocks.runner.runReplyDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        originatingChannel: "telegram",
+        shouldRouteToOriginating: false,
+        suppressUserDelivery: true,
+      }),
+      expect.anything(),
+    );
   });
 
   it("routes external origin replies for internal webchat turns when explicit delivery is set", async () => {
