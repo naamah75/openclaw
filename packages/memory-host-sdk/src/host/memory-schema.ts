@@ -360,7 +360,10 @@ export function migrateMemoryIndexSourcesIdentity(db: DatabaseSync): void {
 /** Ensure canonical memory index tables and the optional FTS table exist. */
 export function ensureMemoryIndexSchema(params: {
   db: DatabaseSync;
-  /** The caller just created this empty private shadow database. */
+  /**
+   * Caller asserts it just created this empty private shadow database.
+   * Passing this for an existing database skips required repair writes.
+   */
   fresh?: true;
   /** @deprecated Omit to use the canonical memory cache table. */
   embeddingCacheTable?: string;
