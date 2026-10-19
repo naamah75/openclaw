@@ -160,6 +160,24 @@ JSON frame bytes and rates per authenticated socket-minute exclude payloads,
 URLs and authentication. Supply any synthetic token through the normal URL
 fragment. The probe builds nothing and neither starts nor stops the Gateway.
 
+Add a real cron workload with `--cron-runs 12 --cron-jobs 20 --interval-ms 2000`
+and optionally `--screenshot /path/to/runtime-complete.png`. Use a fresh isolated
+Gateway with cron enabled and `agents.defaults.heartbeat.every` set to `"0m"`.
+The probe creates disabled synthetic jobs, then forces runs through `cron.run`;
+system-event payloads and disabled heartbeats keep model providers out of the
+workload. Every forced run must finish and its event must reach the browser.
+A separate configuration-edit phase verifies that a changed job name becomes
+visible. Only browser list requests are counted; the controller socket is
+excluded, and the created jobs are removed on exit.
+
+For paired activity measurements, use `--start-at <epoch-ms>` with the same future
+time on both sides; it gates the runtime window after browser readiness and
+rejects a missed deadline. Hold the host's shared measurement lock, use separate
+Gateway states and ports on the two 16-core CPU halves, then swap the halves for
+the next pair. Compare per-pair request-count differences. This small catalog
+fixture covers the browser event trigger, not production database size, model
+inference, native clients, or a model-catalog mutation.
+
 Build runtime artifacts on the authorized benchmark host, generate an offline
 fixture, then let the measurement driver own its loopback Gateway:
 
@@ -215,6 +233,43 @@ hold the shared measurement lock, place A and B on their separate 16-core halves
 then swap halves for the next pair. Record the exact revision, fixture counts
 and physical database bytes; a 64 MiB text fixture preserves roster/run shape
 but does not reproduce multi-GB transcript page-cache pressure.
+
+## Measure branch reads across idle worker retirement
+
+`branch-rotation-measure.ts` drives compressed Control UI WebSockets against an
+owned loopback Gateway and an offline team-shape fixture:
+
+```sh
+node --import ./scripts/tsx.mjs scripts/perf/branch-rotation-measure.ts \
+  --state-dir /path/to/team-shape --output /path/to/new-result-directory \
+  --entry /path/to/prepared/dist/entry.js --port 41451 \
+  --clients 40 --cohorts 12 --poll-ms 10000 --revision <commit-sha>
+```
+
+Each viewer reads a distinct shared transcript through `sessions.branches.list`
+and `chat.history`, alongside `sessions.list`. Before each cohort, an alternating
+`verboseLevel` patch invalidates the database write-token shortcut without
+opening the maintenance reader. A label patch is unsuitable for that purpose:
+label-owner discovery itself retains a maintenance connection.
+
+The warm phase uses startup-prewarmed readers. The private benchmark IPC preload
+then publishes the existing memory-pressure event and waits until all transcript
+workers have exited before the cold phase. This exercises the real retirement
+owner without changing production timers or custody rules. After cold traffic,
+one label patch deliberately recreates the scoped maintenance reader; two more
+cohorts measure recovery under continued invalidating writes. The report separates
+the deliberate retirement from request-driven rotations and records lifecycle
+counters, CPU, memory, request counts, and raw latency samples. First-use warm
+cohorts are reported separately from steady cohorts.
+
+For paired comparisons, pass the same future `--start-at <epoch-ms>` to both
+drivers. Warm, cold, and recovery phases have shared absolute deadlines; a missed
+deadline fails the run. Generate matching fixtures sequentially, hold the shared
+measurement lock around each concurrent pair, and swap the two 16-core allocations
+between pairs. Metadata-only writes permit matched fixture reuse after a completed
+pair. Compare paired differences; keep outside load samples with the results.
+This isolates the worker-rotation mechanism; it does not replay model streaming
+or establish which historical operation started or ended a production episode.
 
 ## Measure history pages and checkout diffs
 
