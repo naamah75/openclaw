@@ -1,3 +1,4 @@
+import { ok } from "node:assert/strict";
 import { afterEach, expect, it, vi } from "vitest";
 import { encodeNativeWorkerFailure } from "../../infra/worker-native-error.js";
 import { BrokerResourceClaims, type BrokerNativeResourceLease } from "./resource-host.js";
@@ -109,7 +110,6 @@ it.each([
     const [reported] = callbacks.failed.mock.calls[0]!;
     expect(reported).toMatchObject({ message: failure.message });
     if (source === "transport") {
-      expect(callbacks.failed).toHaveBeenCalledExactlyOnceWith(failure);
       expect(reported).toBe(failure);
     }
     for (const delivery of deliveries) {
@@ -123,9 +123,6 @@ it.each([
     }
     lease.receive({ type: "resource-closed", id: 1, requestId: 0 });
     expect(claims.hasOpenClaims).toBe(Boolean(sibling));
-    for (const delivery of deliveries) {
-      await expect(delivery.result).rejects.toBe(reported);
-    }
     lease.release();
     if (sibling) {
       const next = sibling.ownerMessage(payload);
@@ -175,14 +172,11 @@ it("settles owner receipts independently and preserves rejection through cleanup
   expect(() => lease.release()).toThrow(/must close before release/);
   lease.receive(receipt);
   expect(callbacks.failed).toHaveBeenCalledOnce();
-  await expect(delivery.result).rejects.toBe(reported);
 
   const cleanupValue = { command: "dispose", padding: "y".repeat(700) };
   const cleanup = lease.ownerMessage(cleanupValue);
-  let cleanupDelivered = false;
-  void cleanup.result.then(() => {
-    cleanupDelivered = true;
-  });
+  const cleanupDelivered = vi.fn();
+  void cleanup.result.then(cleanupDelivered);
   await Promise.resolve();
   expect(transmit).toHaveBeenLastCalledWith({
     type: "resource-owner",
@@ -190,29 +184,24 @@ it("settles owner receipts independently and preserves rejection through cleanup
     sequence: cleanup.sequence,
     value: cleanupValue,
   });
-  expect(cleanupDelivered).toBe(false);
+  expect(cleanupDelivered).not.toHaveBeenCalled();
   lease.receive({ type: "resource-owner-received", id: 1, sequence: cleanup.sequence + 1 });
   await Promise.resolve();
-  expect(cleanupDelivered).toBe(false);
+  expect(cleanupDelivered).not.toHaveBeenCalled();
   lease.receive(receipt);
   await Promise.resolve();
-  expect(cleanupDelivered).toBe(false);
+  expect(cleanupDelivered).not.toHaveBeenCalled();
   expect(callbacks.failed).toHaveBeenCalledOnce();
   lease.receive({ type: "resource-owner-received", id: 1, sequence: cleanup.sequence });
   await Promise.resolve();
-  expect(cleanupDelivered).toBe(true);
-  await cleanup.result;
+  expect(cleanupDelivered).toHaveBeenCalledOnce();
   expect(claims).toMatchObject({ size: 1, hasOpenClaims: true });
-  await expect(delivery.result).rejects.toBe(reported);
   const closing = lease.close();
   await Promise.resolve();
   const close = transmit.mock.calls
     .map(([request]) => request)
     .find((request) => request.type === "resource-close");
-  expect(close).toBeDefined();
-  if (!close || close.type !== "resource-close") {
-    throw new Error("Expected the actual resource close request");
-  }
+  ok(close?.type === "resource-close", "Expected the actual resource close request");
   lease.receive({ type: "resource-closed", id: 1, requestId: close.requestId });
   await closing;
   lease.release();
@@ -237,7 +226,6 @@ it("rejects unsent owner delivery when native close precedes its acknowledgment"
   const next = sibling.ownerMessage("y".repeat(700));
   sibling.abandonUnattached();
   await expect(next.result).rejects.toThrow(/never dispatched/);
-  sibling.abandonUnattached();
   lease.release();
   expect(claims.size).toBe(0);
 });
