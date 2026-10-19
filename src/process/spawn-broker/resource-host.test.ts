@@ -1,10 +1,18 @@
-import { expect, it, vi } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { encodeNativeWorkerFailure } from "../../infra/worker-native-error.js";
-import { BrokerResourceClaims } from "./resource-host.js";
+import { BrokerResourceClaims, type BrokerNativeResourceLease } from "./resource-host.js";
 import type { BrokerResourceRequest, BrokerResourceResponse } from "./resource-protocol.js";
 
 // Exercise both capacity dimensions without reserving the production 256 MiB budget.
 vi.mock("./ipc.js", () => ({ MAX_PENDING_BYTES: 1024, MAX_PENDING_MESSAGES: 4 }));
+
+const leases: BrokerNativeResourceLease[] = [];
+afterEach(() => {
+  for (const lease of leases.splice(0)) {
+    lease.receive({ type: "resource-closed", id: lease.attachment.id, requestId: 0 });
+    lease.release();
+  }
+});
 
 function fixture() {
   const transmit = vi
@@ -19,8 +27,8 @@ function fixture() {
     markReady: vi.fn(),
     refreshReference: vi.fn(),
   });
-  const capture = (id: number) =>
-    claims.capture(
+  const capture = (id: number) => {
+    const lease = claims.capture(
       {
         id,
         endpoint: "synthetic-resource-endpoint",
@@ -31,12 +39,15 @@ function fixture() {
       },
       callbacks,
     );
+    leases.push(lease);
+    return lease;
+  };
   return { claims, capture, transmit, callbacks };
 }
 
 const capacityCases = [
-  { dimension: "messages", payload: "", count: 4 },
-  { dimension: "bytes", payload: "x".repeat(700), count: 1 },
+  { source: "resource" as const, dimension: "messages", payload: "", count: 4 },
+  { source: "resource" as const, dimension: "bytes", payload: "x".repeat(700), count: 1 },
 ];
 
 it.each(capacityCases)(
@@ -46,19 +57,15 @@ it.each(capacityCases)(
     for (let id = 1; id <= 3; id++) {
       const lease = capture(id);
       const deliveries: Array<ReturnType<typeof lease.ownerMessage>> = [];
-      try {
-        for (let message = 0; message < count; message++) {
-          deliveries.push(lease.ownerMessage(payload));
-        }
-        expect(() => lease.ownerMessage(payload)).toThrow(/delivery capacity exceeded/);
-        expect(claims.size).toBe(1);
-        // No attach/ready receipt and no transmission: this fixture owns no-dispatch proof.
-        expect(transmit).not.toHaveBeenCalled();
-      } finally {
-        lease.abandonUnattached();
+      for (let message = 0; message < count; message++) {
+        deliveries.push(lease.ownerMessage(payload));
       }
-      expect(claims.size).toBe(0);
-      expect(claims.hasOpenClaims).toBe(false);
+      expect(() => lease.ownerMessage(payload)).toThrow(/delivery capacity exceeded/);
+      expect(claims.size).toBe(1);
+      // No attach/ready receipt and no transmission: this fixture owns no-dispatch proof.
+      expect(transmit).not.toHaveBeenCalled();
+      lease.abandonUnattached();
+      expect(claims).toMatchObject({ size: 0, hasOpenClaims: false });
       for (const delivery of deliveries) {
         await expect(delivery.result).rejects.toThrow(/never dispatched/);
       }
@@ -68,12 +75,7 @@ it.each(capacityCases)(
 );
 
 it.each([
-  ...capacityCases.map(({ dimension, payload, count }) => ({
-    dimension,
-    payload,
-    count,
-    source: "resource" as const,
-  })),
+  ...capacityCases,
   {
     source: "transport" as const,
     dimension: "messages",
@@ -92,53 +94,45 @@ it.each([
     const failure = new Error(
       source === "resource" ? "resource operation failed" : "broker transport lost",
     );
-    try {
-      if (source === "resource") {
-        await Promise.resolve();
-        expect(transmit).toHaveBeenCalledTimes(count);
-        lease.receive({
-          type: "resource-failed",
-          id: 1,
-          error: encodeNativeWorkerFailure(failure),
-        });
-      } else {
-        claims.fail(failure);
-      }
-      expect(callbacks.failed).toHaveBeenCalledOnce();
-      const [reported] = callbacks.failed.mock.calls[0]!;
-      expect(reported).toMatchObject({ message: failure.message });
-      if (source === "transport") {
-        expect(callbacks.failed).toHaveBeenCalledExactlyOnceWith(failure);
-        expect(reported).toBe(failure);
-      }
-      for (const delivery of deliveries) {
-        await expect(delivery.result).rejects.toBe(reported);
-      }
-      expect(claims.size).toBe(sibling ? 2 : 1);
-      expect(claims.hasOpenClaims).toBe(true);
-      expect(() => lease.release()).toThrow(/must close before release/);
-      expect(() => lease.abandonUnattached()).toThrow(/cannot be abandoned/);
-      if (sibling) {
-        expect(() => sibling.ownerMessage(payload)).toThrow(/delivery capacity exceeded/);
-      }
-      lease.receive({ type: "resource-closed", id: 1, requestId: 0 });
-      expect(claims.hasOpenClaims).toBe(Boolean(sibling));
-      for (const delivery of deliveries) {
-        await expect(delivery.result).rejects.toBe(reported);
-      }
-      lease.release();
-      if (sibling) {
-        const next = sibling.ownerMessage(payload);
-        sibling.abandonUnattached();
-        await expect(next.result).rejects.toThrow(/never dispatched/);
-      }
-      expect(claims.size).toBe(0);
-    } finally {
-      lease.receive({ type: "resource-closed", id: 1, requestId: 0 });
-      lease.release();
-      sibling?.abandonUnattached();
-      await Promise.allSettled(deliveries.map((delivery) => delivery.result));
+    if (source === "resource") {
+      await Promise.resolve();
+      expect(transmit).toHaveBeenCalledTimes(count);
+      lease.receive({
+        type: "resource-failed",
+        id: 1,
+        error: encodeNativeWorkerFailure(failure),
+      });
+    } else {
+      claims.fail(failure);
     }
+    expect(callbacks.failed).toHaveBeenCalledOnce();
+    const [reported] = callbacks.failed.mock.calls[0]!;
+    expect(reported).toMatchObject({ message: failure.message });
+    if (source === "transport") {
+      expect(callbacks.failed).toHaveBeenCalledExactlyOnceWith(failure);
+      expect(reported).toBe(failure);
+    }
+    for (const delivery of deliveries) {
+      await expect(delivery.result).rejects.toBe(reported);
+    }
+    expect(claims).toMatchObject({ size: sibling ? 2 : 1, hasOpenClaims: true });
+    expect(() => lease.release()).toThrow(/must close before release/);
+    expect(() => lease.abandonUnattached()).toThrow(/cannot be abandoned/);
+    if (sibling) {
+      expect(() => sibling.ownerMessage(payload)).toThrow(/delivery capacity exceeded/);
+    }
+    lease.receive({ type: "resource-closed", id: 1, requestId: 0 });
+    expect(claims.hasOpenClaims).toBe(Boolean(sibling));
+    for (const delivery of deliveries) {
+      await expect(delivery.result).rejects.toBe(reported);
+    }
+    lease.release();
+    if (sibling) {
+      const next = sibling.ownerMessage(payload);
+      sibling.abandonUnattached();
+      await expect(next.result).rejects.toThrow(/never dispatched/);
+    }
+    expect(claims.size).toBe(0);
   },
 );
 
@@ -160,74 +154,68 @@ it("settles owner receipts independently and preserves rejection through cleanup
     sequence: delivery.sequence,
     error: encodeNativeWorkerFailure(failure),
   };
-  try {
-    await Promise.resolve();
-    expect(transmit).toHaveBeenCalledExactlyOnceWith({
-      type: "resource-owner",
-      id: 1,
-      sequence: delivery.sequence,
-      value,
-    });
-    lease.receive(receipt);
-    expect(callbacks.failed).toHaveBeenCalledOnce();
-    const [reported] = callbacks.failed.mock.calls[0]!;
-    expect(reported).toBeInstanceOf(Error);
-    expect(reported).toMatchObject({
-      message: "owner callback refused",
-      code: "OWNER_CALLBACK_REFUSED",
-      cause: { message: "original callback cause", code: "SQLITE_BUSY" },
-    });
-    await expect(delivery.result).rejects.toBe(reported);
-    expect(claims.hasOpenClaims).toBe(true);
-    expect(claims.size).toBe(1);
-    expect(() => lease.release()).toThrow(/must close before release/);
-    lease.receive(receipt);
-    expect(callbacks.failed).toHaveBeenCalledOnce();
-    await expect(delivery.result).rejects.toBe(reported);
+  await Promise.resolve();
+  expect(transmit).toHaveBeenCalledExactlyOnceWith({
+    type: "resource-owner",
+    id: 1,
+    sequence: delivery.sequence,
+    value,
+  });
+  lease.receive(receipt);
+  expect(callbacks.failed).toHaveBeenCalledOnce();
+  const [reported] = callbacks.failed.mock.calls[0]!;
+  expect(reported).toBeInstanceOf(Error);
+  expect(reported).toMatchObject({
+    message: "owner callback refused",
+    code: "OWNER_CALLBACK_REFUSED",
+    cause: { message: "original callback cause", code: "SQLITE_BUSY" },
+  });
+  await expect(delivery.result).rejects.toBe(reported);
+  expect(claims).toMatchObject({ size: 1, hasOpenClaims: true });
+  expect(() => lease.release()).toThrow(/must close before release/);
+  lease.receive(receipt);
+  expect(callbacks.failed).toHaveBeenCalledOnce();
+  await expect(delivery.result).rejects.toBe(reported);
 
-    const cleanupValue = { command: "dispose", padding: "y".repeat(700) };
-    const cleanup = lease.ownerMessage(cleanupValue);
-    let cleanupDelivered = false;
-    void cleanup.result.then(() => {
-      cleanupDelivered = true;
-    });
-    await Promise.resolve();
-    expect(transmit).toHaveBeenLastCalledWith({
-      type: "resource-owner",
-      id: 1,
-      sequence: cleanup.sequence,
-      value: cleanupValue,
-    });
-    expect(cleanupDelivered).toBe(false);
-    lease.receive({ type: "resource-owner-received", id: 1, sequence: cleanup.sequence + 1 });
-    await Promise.resolve();
-    expect(cleanupDelivered).toBe(false);
-    lease.receive(receipt);
-    await Promise.resolve();
-    expect(cleanupDelivered).toBe(false);
-    expect(callbacks.failed).toHaveBeenCalledOnce();
-    lease.receive({ type: "resource-owner-received", id: 1, sequence: cleanup.sequence });
-    await Promise.resolve();
-    expect(cleanupDelivered).toBe(true);
-    await cleanup.result;
-    expect(claims.hasOpenClaims).toBe(true);
-    expect(claims.size).toBe(1);
-    await expect(delivery.result).rejects.toBe(reported);
-    const closing = lease.close();
-    await Promise.resolve();
-    const close = transmit.mock.calls
-      .map(([request]) => request)
-      .find((request) => request.type === "resource-close");
-    expect(close).toBeDefined();
-    if (!close || close.type !== "resource-close") {
-      throw new Error("Expected the actual resource close request");
-    }
-    lease.receive({ type: "resource-closed", id: 1, requestId: close.requestId });
-    await closing;
-  } finally {
-    lease.receive({ type: "resource-closed", id: 1, requestId: 0 });
-    lease.release();
+  const cleanupValue = { command: "dispose", padding: "y".repeat(700) };
+  const cleanup = lease.ownerMessage(cleanupValue);
+  let cleanupDelivered = false;
+  void cleanup.result.then(() => {
+    cleanupDelivered = true;
+  });
+  await Promise.resolve();
+  expect(transmit).toHaveBeenLastCalledWith({
+    type: "resource-owner",
+    id: 1,
+    sequence: cleanup.sequence,
+    value: cleanupValue,
+  });
+  expect(cleanupDelivered).toBe(false);
+  lease.receive({ type: "resource-owner-received", id: 1, sequence: cleanup.sequence + 1 });
+  await Promise.resolve();
+  expect(cleanupDelivered).toBe(false);
+  lease.receive(receipt);
+  await Promise.resolve();
+  expect(cleanupDelivered).toBe(false);
+  expect(callbacks.failed).toHaveBeenCalledOnce();
+  lease.receive({ type: "resource-owner-received", id: 1, sequence: cleanup.sequence });
+  await Promise.resolve();
+  expect(cleanupDelivered).toBe(true);
+  await cleanup.result;
+  expect(claims).toMatchObject({ size: 1, hasOpenClaims: true });
+  await expect(delivery.result).rejects.toBe(reported);
+  const closing = lease.close();
+  await Promise.resolve();
+  const close = transmit.mock.calls
+    .map(([request]) => request)
+    .find((request) => request.type === "resource-close");
+  expect(close).toBeDefined();
+  if (!close || close.type !== "resource-close") {
+    throw new Error("Expected the actual resource close request");
   }
+  lease.receive({ type: "resource-closed", id: 1, requestId: close.requestId });
+  await closing;
+  lease.release();
   expect(claims.size).toBe(0);
 });
 
@@ -238,25 +226,18 @@ it("rejects unsent owner delivery when native close precedes its acknowledgment"
   lease.receive({ type: "resource-ready", id: 1, pid: 42, generation: 1 });
   // Ready schedules the sender; native close arrives before that continuation can transmit.
   lease.receive({ type: "resource-closed", id: 1, requestId: 0 });
-  try {
-    await expect(delivery.result).rejects.toThrow(/closed before owner delivery was acknowledged/);
-    expect(transmit).not.toHaveBeenCalled();
-    expect(claims.hasOpenClaims).toBe(false);
-    expect(claims.size).toBe(1);
-    await expect(lease.close()).resolves.toBeUndefined();
-    expect(transmit).not.toHaveBeenCalled();
+  await expect(delivery.result).rejects.toThrow(/closed before owner delivery was acknowledged/);
+  expect(transmit).not.toHaveBeenCalled();
+  expect(claims).toMatchObject({ size: 1, hasOpenClaims: false });
+  await expect(lease.close()).resolves.toBeUndefined();
+  expect(transmit).not.toHaveBeenCalled();
 
-    // Closing frees packet credit even while the closed claim is awaiting release.
-    const sibling = capture(2);
-    try {
-      const next = sibling.ownerMessage("y".repeat(700));
-      sibling.abandonUnattached();
-      await expect(next.result).rejects.toThrow(/never dispatched/);
-    } finally {
-      sibling.abandonUnattached();
-    }
-  } finally {
-    lease.release();
-  }
+  // Closing frees packet credit even while the closed claim is awaiting release.
+  const sibling = capture(2);
+  const next = sibling.ownerMessage("y".repeat(700));
+  sibling.abandonUnattached();
+  await expect(next.result).rejects.toThrow(/never dispatched/);
+  sibling.abandonUnattached();
+  lease.release();
   expect(claims.size).toBe(0);
 });
