@@ -39,7 +39,6 @@ import {
 } from "./naming.js";
 import { DiscussionReconcileScheduler } from "./reconcile-scheduler.js";
 import {
-  clearClickClackDiscussionChannelRevoked,
   isClickClackDiscussionChannelRevokedAsync,
   markClickClackDiscussionChannelRevoked,
   prepareClickClackDiscussionChannelRevocation,
@@ -47,6 +46,7 @@ import {
 import { readDiscussionHistory } from "./service-history.js";
 import {
   assertChannelPatch,
+  finalizePendingDiscussionBinding,
   reconcilePendingDiscussionOpen,
   openClickClackDiscussionBinding,
   renameDiscussionChannel,
@@ -234,8 +234,6 @@ export class ClickClackDiscussionService {
           this.#reconcilePendingOpen(pending, { allowRetry: false }),
         withChannelMutationLock: (run) => this.#withChannelMutationLock(run),
         ensureBindingCapacity: (key) => this.#detachedBindings.ensureCapacity(key),
-        finalizePendingBinding: (key, nextBinding) =>
-          this.#finalizePendingBinding(key, nextBinding),
         warn: (message) => this.#logger().warn(message),
       });
     } finally {
@@ -345,7 +343,7 @@ export class ClickClackDiscussionService {
     binding: ClickClackDiscussionBinding,
     resolvedAccount?: ResolvedClickClackAccount,
   ): Promise<void> {
-    await this.#finalizePendingBinding(sessionKey, binding);
+    await finalizePendingDiscussionBinding(this.#runtime, sessionKey, binding);
     if (
       await isClickClackDiscussionChannelRevokedAsync({
         runtime: this.#runtime,
@@ -575,7 +573,6 @@ export class ClickClackDiscussionService {
       clientFactory: this.#clientFactory,
       pending,
       ...options,
-      finalizePendingBinding: (key, binding) => this.#finalizePendingBinding(key, binding),
       open: (key) => this.#open(key),
     });
   }
@@ -607,28 +604,6 @@ export class ClickClackDiscussionService {
       return false;
     }
     return await this.#store.deleteIfCurrent(sessionKey, binding);
-  }
-
-  async #finalizePendingBinding(
-    sessionKey: string,
-    binding: ClickClackDiscussionBinding,
-  ): Promise<void> {
-    const pending = await getPendingDiscussionOpen(this.#runtime, sessionKey);
-    if (pending?.externalRef === binding.externalRef) {
-      // A matching binding is the durable commit record. Clear the fail-closed
-      // tombstone first, then the recovery reservation; every crash point can
-      // replay this sequence without orphaning the remote channel.
-      await clearClickClackDiscussionChannelRevoked({
-        runtime: this.#runtime,
-        serverBaseUrl: binding.serverBaseUrl,
-        channelId: binding.channelId,
-      });
-      await clearDiscussionBindingGeneration({
-        runtime: this.#runtime,
-        sessionKey,
-        expectedGeneration: pending.generation,
-      });
-    }
   }
 
   async #resolveBindingForUse(
