@@ -1,9 +1,16 @@
 import { createEffect, createMemo, createSignal } from "solid-js";
 import { t } from "../../lib/reactive/i18n.ts";
-import type { NewSessionComposerOptions } from "./composer.tsx";
+import type { NewSessionComposerTextarea } from "./composer-textarea.ts";
 
 /** Animation belongs to the mounted input; menu and draft updates do not restart it. */
-export function createComposerPlaceholder(options: () => NewSessionComposerOptions) {
+export function createComposerPlaceholder(
+  options: () => {
+    nativeTerminal?: boolean;
+    message: string;
+    dictationActive?: boolean;
+    composerTextarea: Pick<NewSessionComposerTextarea, "getTextarea">;
+  },
+) {
   const target = createMemo(() =>
     t(
       options().nativeTerminal
