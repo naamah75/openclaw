@@ -14,6 +14,14 @@ function decodeGitPaths(listed: Buffer): string[] {
   return listed.toString("utf8").split("\0").filter(Boolean);
 }
 
+export function parseLocalWorkspaceSourcePaths(value: string): string[] {
+  const paths: unknown = JSON.parse(value);
+  if (!isStringArray(paths)) {
+    throw new Error("Invalid local workspace source admission");
+  }
+  return paths;
+}
+
 /** Admit untracked source once, before any guest can change canonical ignore rules. */
 export async function admitLocalWorkspaceSourcePaths(params: {
   root: string;
@@ -33,22 +41,28 @@ export async function admitLocalWorkspaceSourcePaths(params: {
 export async function selectLocalWorkspaceCanonicalPaths(params: {
   root: string;
   admittedPaths: string;
+  // Reuse authoritative host inputs read earlier in this operation.
+  preparedPaths?: ReadonlySet<string>;
   baseline?: WorkerWorkspaceManifest;
   signal?: AbortSignal;
   assertCurrent: () => void;
 }): Promise<Set<string>> {
-  const listed = await requireGitBuffer(params.root, ["ls-files", "--cached", "-z"], {
-    signal: params.signal,
-    beforeRun: params.assertCurrent,
-  });
+  params.signal?.throwIfAborted();
   params.assertCurrent();
-  // Only the host owns this index; the guest has independent Git metadata. A
-  // host can deliberately admit a new path with git add, even if it is ignored.
-  const admitted: unknown = JSON.parse(params.admittedPaths);
-  if (!isStringArray(admitted)) {
-    throw new Error("Invalid local workspace source admission");
+  let paths: Set<string>;
+  if (params.preparedPaths) {
+    paths = new Set(params.preparedPaths);
+  } else {
+    const listed = await requireGitBuffer(params.root, ["ls-files", "--cached", "-z"], {
+      signal: params.signal,
+      beforeRun: params.assertCurrent,
+    });
+    params.assertCurrent();
+    // Only the host owns this index; the guest has independent Git metadata. A
+    // host can deliberately admit a new path with git add, even if it is ignored.
+    const admitted = parseLocalWorkspaceSourcePaths(params.admittedPaths);
+    paths = new Set<string>([...admitted, ...decodeGitPaths(listed)]);
   }
-  const paths = new Set<string>([...admitted, ...decodeGitPaths(listed)]);
   if (params.baseline) {
     for (const entryPath of manifestNodes(params.baseline).keys()) {
       paths.add(entryPath);
