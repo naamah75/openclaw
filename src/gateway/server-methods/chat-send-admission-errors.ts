@@ -1,5 +1,9 @@
 import { collectNestedErrorCandidates } from "@openclaw/normalization-core/error-coercion";
-import { ErrorCodes, errorShape } from "../../../packages/gateway-protocol/src/index.js";
+import {
+  ErrorCodes,
+  errorShape,
+  type ErrorShape,
+} from "../../../packages/gateway-protocol/src/index.js";
 import { GATEWAY_RESTART_UNAVAILABLE_REASON } from "../../../packages/gateway-protocol/src/restart-unavailable.js";
 import { renderStorageFailureSummary } from "../../agents/failover/assistant-request-failure-copy.js";
 import { isAgentRunRestartAbortReason } from "../../agents/run-termination.js";
@@ -7,12 +11,21 @@ import { SESSION_ROUTING_CHANGED_ERROR_REASON } from "../../config/sessions/main
 import { isSessionTranscriptProjectionUnavailableError } from "../../config/sessions/session-transcript-projection-error.js";
 import { classifyGatewayStorageFailure } from "../../infra/sqlite-error-diagnostics.js";
 import { isGatewayRestartDrainError } from "../../process/gateway-work-admission.js";
+import { AgentDatabaseAdmissionError } from "../../state/agent-database-admission.js";
 import { errorShapeFromError } from "../error-shape.js";
 import { SessionMutationAuthorizationChangedError } from "../session-mutation-authorization-error.js";
 import { formatForLog } from "../ws-log.js";
-import { ACTIVE_LEAF_CHANGED_ERROR_REASON } from "./chat-send-active-leaf.js";
-import { SESSION_SETTINGS_CHANGED_ERROR_REASON } from "./chat-send-session-settings.js";
 import type { GatewayRequestHandlerOptions } from "./types.js";
+
+/** An expected precondition refusal has an RPC response, not a failed-turn terminal. */
+export class ChatSendAdmissionRefusedError extends Error {
+  constructor(
+    message: string,
+    readonly error: ErrorShape = errorShape(ErrorCodes.INVALID_REQUEST, message),
+  ) {
+    super(message);
+  }
+}
 
 export function resolveChatSendStorageErrorMessage(error: unknown): string | undefined {
   for (const candidate of collectNestedErrorCandidates(error)) {
@@ -24,14 +37,17 @@ export function resolveChatSendStorageErrorMessage(error: unknown): string | und
   return undefined;
 }
 
-export function respondChatSessionRoutingChanged(respond: GatewayRequestHandlerOptions["respond"]) {
-  respond(
-    false,
-    undefined,
+export function createChatSessionRoutingChangedError() {
+  return new ChatSendAdmissionRefusedError(
+    SESSION_ROUTING_CHANGED_ERROR_REASON,
     errorShape(ErrorCodes.INVALID_REQUEST, "session routing changed; review and retry", {
       details: { reason: SESSION_ROUTING_CHANGED_ERROR_REASON },
     }),
   );
+}
+
+export function respondChatSessionRoutingChanged(respond: GatewayRequestHandlerOptions["respond"]) {
+  respond(false, undefined, createChatSessionRoutingChangedError().error);
 }
 
 export function respondChatSendAdmissionError(
@@ -39,6 +55,15 @@ export function respondChatSendAdmissionError(
   respond: GatewayRequestHandlerOptions["respond"],
   onUnexpectedError?: (message: string) => void,
 ): void {
+  if (
+    error instanceof ChatSendAdmissionRefusedError ||
+    error instanceof SessionMutationAuthorizationChangedError
+  ) {
+    return respond(false, undefined, error.error);
+  }
+  if (error instanceof AgentDatabaseAdmissionError) {
+    return respond(false, undefined, errorShapeFromError(ErrorCodes.UNAVAILABLE, error));
+  }
   if (isAgentRunRestartAbortReason(error) || isGatewayRestartDrainError(error)) {
     return respond(
       false,
@@ -47,37 +72,6 @@ export function respondChatSendAdmissionError(
         retryable: true,
         details: { reason: GATEWAY_RESTART_UNAVAILABLE_REASON },
       }),
-    );
-  }
-  const reason = error instanceof Error ? error.message : undefined;
-  if (reason === "goal-session-busy") {
-    return respond(
-      false,
-      undefined,
-      errorShape(
-        ErrorCodes.UNAVAILABLE,
-        "This session still has active or queued work. Wait for it to finish, then retry the Goal.",
-        { retryable: true, details: { reason: "goal-session-busy" } },
-      ),
-    );
-  }
-  if (reason === SESSION_ROUTING_CHANGED_ERROR_REASON) {
-    return respondChatSessionRoutingChanged(respond);
-  }
-  if (
-    reason === ACTIVE_LEAF_CHANGED_ERROR_REASON ||
-    reason === SESSION_SETTINGS_CHANGED_ERROR_REASON
-  ) {
-    return respond(
-      false,
-      undefined,
-      errorShape(
-        ErrorCodes.INVALID_REQUEST,
-        reason === ACTIVE_LEAF_CHANGED_ERROR_REASON
-          ? "active branch changed; review and retry"
-          : "Session settings changed before send. Retry.",
-        { details: { reason } },
-      ),
     );
   }
   if (isSessionTranscriptProjectionUnavailableError(error)) {
@@ -98,11 +92,5 @@ export function respondChatSendAdmissionError(
     { message: storageMessage ?? formatForLog(error) },
   );
   respond(false, undefined, failure);
-  // A storage refusal ends this attempt even when a later request can safely retry.
-  if (
-    (storageMessage !== undefined || !failure.retryable) &&
-    !(error instanceof SessionMutationAuthorizationChangedError)
-  ) {
-    onUnexpectedError?.(failure.message);
-  }
+  onUnexpectedError?.(failure.message);
 }

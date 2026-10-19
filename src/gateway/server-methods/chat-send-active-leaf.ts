@@ -1,7 +1,9 @@
+import { ErrorCodes, errorShape } from "../../../packages/gateway-protocol/src/index.js";
 import { withSessionEntriesFromStoresInWorker } from "../../config/sessions/session-entry-read-runtime.js";
 import type { SessionTranscriptAnchorFacts } from "../../config/sessions/session-transcript-anchor-read.types.js";
 import { isIncognitoSessionKey } from "../../routing/session-key.js";
 import type { GatewaySessionEntryRead } from "../session-utils.js";
+import { ChatSendAdmissionRefusedError } from "./chat-send-admission-errors.js";
 
 export const ACTIVE_LEAF_CHANGED_ERROR_REASON = "active-leaf-changed";
 
@@ -30,7 +32,12 @@ export function assertExpectedLeafActive(
       (activePathRelation === "ancestor" ||
         (options?.allowEmptyAncestor === true && expectedLeafEntryId === null)));
   if (!matchesRequestedSession || !matchesActivePath) {
-    throw new Error(ACTIVE_LEAF_CHANGED_ERROR_REASON);
+    throw new ChatSendAdmissionRefusedError(
+      ACTIVE_LEAF_CHANGED_ERROR_REASON,
+      errorShape(ErrorCodes.INVALID_REQUEST, "active branch changed; review and retry", {
+        details: { reason: ACTIVE_LEAF_CHANGED_ERROR_REASON },
+      }),
+    );
   }
 }
 
