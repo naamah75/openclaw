@@ -71,7 +71,12 @@ const allocate = (offsets?: number[], fallback = false) =>
       })
     : ports.getDeterministicFreePortBlock(offsets && { offsets });
 
-function expectBlock(port: number, offsets: number[], outside?: number[], inside = [1024, 65535]) {
+function expectBlock(
+  port: number,
+  offsets: number[],
+  outside?: [number, number],
+  inside: [number, number] = [1024, 65535],
+) {
   for (const offset of offsets) {
     const candidate = port + offset;
     expect(candidate).toBeGreaterThanOrEqual(inside[0]);

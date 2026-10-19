@@ -16,7 +16,9 @@ vi.mock(import("openclaw/plugin-sdk/ssrf-runtime"), async (importOriginal) => ({
 }));
 
 vi.mock("@aws-sdk/s3-request-presigner", () => ({ getSignedUrl: mockGetSignedUrl }));
+// mock-isolation: upload tests supply authentication without contacting a ship.
 vi.mock("./urbit/auth.js", () => ({ authenticate: vi.fn() }));
+// mock-isolation: upload tests supply storage scries without a live channel transport.
 vi.mock("./urbit/channel-ops.js", () => ({ scryUrbitPath: vi.fn() }));
 
 import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";

@@ -94,7 +94,7 @@ export function holdMetadataThroughSubagentStop(target: {
         return execution;
       }
       // Captures return fresh borrowers, so only this producer's handle is wrapped.
-      const runExisting = execution.runExisting;
+      const runExisting = execution.runExisting.bind(execution);
       execution.runExisting = (source, operation, options) =>
         runExisting(
           source,

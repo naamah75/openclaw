@@ -222,7 +222,7 @@ describe("openclaw test state", () => {
         }
         environment.restore();
         try {
-          await lifetime.cleanup().catch((error) => {
+          await lifetime.cleanup().catch((error: unknown) => {
             if (!failedRollback) {
               throw error;
             }

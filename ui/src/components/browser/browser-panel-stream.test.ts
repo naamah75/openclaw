@@ -14,7 +14,7 @@ import {
   PAGE_URL,
   ready,
   streamFixture,
-} from "./browser-panel-stream-test-support.ts";
+} from "./browser-panel-stream.test-support.ts";
 import { screencastFrame, TestScreencastSocket } from "./browser-screencast-test-support.ts";
 
 const NEXT_URL = "https://example.test/next";

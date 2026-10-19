@@ -54,7 +54,7 @@ it.each([
   ["https://github.com/openclaw/openclaw/extra"],
   ["git@github.com:../../tmp/openclaw.git"],
   ["https://github.com/openclaw/openclaw.git --config=evil"],
-])("rejects unsafe project clone URL %s", (input, host) => {
+])("rejects unsafe project clone URL %s", (input, host?: string) => {
   expect(parseProjectGitUrl(input, host)).toBeNull();
 });
 

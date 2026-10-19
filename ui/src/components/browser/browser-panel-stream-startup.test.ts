@@ -8,7 +8,7 @@ import {
   ready,
   StartupSocket,
   streamFixture,
-} from "./browser-panel-stream-test-support.ts";
+} from "./browser-panel-stream.test-support.ts";
 import { screencastFrame } from "./browser-screencast-test-support.ts";
 
 const { setup: setupStream, sockets } = streamFixture(StartupSocket, true);

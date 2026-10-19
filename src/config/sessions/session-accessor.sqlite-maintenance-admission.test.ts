@@ -176,15 +176,15 @@ test("maintenance preparation yields to foreground writes and retains commit adm
     releaseArchive.resolve();
     await earlierArchive;
     await waitFor("preparation");
-    write("preparation-writer");
+    void write("preparation-writer");
     worker.postMessage({ type: "prepare" }, []);
     await waitFor("validation-gap");
     expect(order).toEqual(foreground.slice(0, 2));
-    write("validation-writer");
+    void write("validation-writer");
     worker.postMessage({ type: "continue" }, []);
     await waitFor("commit-gap");
     expect(order).toEqual(foreground);
-    write("later-writer");
+    void write("later-writer");
     worker.postMessage({ type: "settle" }, []);
     await expect(finalization).resolves.toMatchObject({ kind: "maintenance-finalize" });
     await Promise.all(writers);

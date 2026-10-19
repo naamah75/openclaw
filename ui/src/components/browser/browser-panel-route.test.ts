@@ -69,10 +69,7 @@ function pageResponse(request: BrowserRequestEnvelope, url: string, title: strin
   return request.path === "/act" ? metrics(url, title) : { ok: true };
 }
 
-function pageGateway(
-  handle: (request: BrowserRequestEnvelope) => unknown | Promise<unknown>,
-  screencast = false,
-) {
+function pageGateway(handle: (request: BrowserRequestEnvelope) => unknown, screencast = false) {
   const url = "https://managed.example/";
   const title = "managed";
   return createBrowserClient(
@@ -332,6 +329,7 @@ it("leaves a stopped browser on its Start affordance instead of focusing a histo
     if (request.path === "/start") {
       running = true;
     }
+    return undefined;
   });
   const panel = await mountPanel(gateway.client, false);
   panel.preferredTab = { tab: { ...hostTab, targetId: "dead-target" }, revision: "stale" };

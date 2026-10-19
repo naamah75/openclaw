@@ -47,10 +47,11 @@ afterEach(async () => {
   await closeOpenClawAgentDatabasesAsync();
   closeOpenClawAgentDatabasesForTest();
   resetGatewayWorkAdmission();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
-function createCapBatchStore(afterPlan?: () => void | Promise<void>) {
+function createCapBatchStore(protectedOnly = false, afterPlan?: () => void | Promise<void>) {
   const fixture = createSessionMaintenanceKickStore({
     storePath: path.join(tempDirs.make("session-maintenance-cap-"), "agent.sqlite"),
     key: sessionKey,
@@ -62,9 +63,17 @@ function createCapBatchStore(afterPlan?: () => void | Promise<void>) {
   vi.useRealTimers();
   const keys = Array.from({ length: 179 }, (_, index) => `agent:main:cap-batch-${index}`);
   runOpenClawAgentWriteTransaction((database) => {
+    if (protectedOnly) {
+      writeSessionEntry(database, sessionKey, {
+        sessionId: "age-kick",
+        updatedAt: fixture.updatedAt,
+        modelSelectionLocked: true,
+      });
+    }
     keys.forEach((key, index) => {
       writeSessionEntry(database, key, {
         sessionId: `cap-batch-${index}`,
+        ...(protectedOnly ? { modelSelectionLocked: true } : {}),
         updatedAt: fixture.updatedAt - keys.length + index,
       });
     });
@@ -80,80 +89,124 @@ function createCapBatchStore(afterPlan?: () => void | Promise<void>) {
     }
     return result;
   });
-  return {
-    ...fixture,
-    keys,
-    plans,
-    archivedKeys: () =>
-      keys.filter(
-        (key) => loadSessionEntry({ storePath: fixture.storePath, sessionKey: key })?.archivedAt,
-      ),
-  };
+  return { ...fixture, keys, plans };
 }
 
-it("releases the cap writer between batches and honors new protection", async ({ signal }) => {
-  let protectedKeys: string[] = [];
-  let releases = 0;
-  let foreground: Promise<unknown> | undefined;
-  const batch = createCapBatchStore(async () => {
-    if (++releases === 1) {
-      protectedKeys = [keys[64]!];
-      await withinTest(foreground!, signal);
+it.for(["automatic", "inline", "protected"] as const)(
+  "bounds cap work and finishes eligible capacity maintenance (%s)",
+  async (owner, { signal }) => {
+    const { request, scope, storePath, keys, plans } = createCapBatchStore(owner === "protected");
+    if (owner === "inline") {
+      plans.push(
+        runOpenClawAgentWriteTransaction(
+          (database) =>
+            maintenance.applySessionEntryMaintenance(database, {
+              activeSessionKey: sessionKey,
+              archiveDirectory: request.archiveDirectory,
+              forceMaintenance: true,
+              maintenanceConfig: request.maintenanceConfig,
+              preservation: () => ({
+                providerKeys: [],
+                workIdentities: [],
+                lifecycleIdentities: [],
+              }),
+              storePath,
+            }),
+          scope,
+        ),
+      );
+    } else {
+      const completed = observeMaintenanceCompletion(storePath);
+      kickSessionEntryMaintenanceAfterWrite(request);
+      await completed(signal);
     }
-  });
-  const { request, storePath, keys, plans } = batch;
-  const protectedKey = keys[64]!;
-  const unregister = registerSessionMaintenancePreserveKeysProvider(async () => ({
-    capture: () => protectedKeys,
-    dispose() {},
-  }));
-  let commits = 0;
-  let foregroundCompleted = false;
-  observeSessionMaintenancePlanningWorker({
-    afterExecute(result) {
-      if (result.kind === "committed" && ++commits === 1) {
-        // Queue under the first operation; await only after its FIFO custody is released.
-        foreground = patchSessionEntryCore(
-          { storePath, sessionKey },
-          () => ({ label: "foreground between cap batches" }),
-          { skipMaintenance: true },
-        ).then(() => {
-          foregroundCompleted = true;
-        });
-      }
-    },
-    beforeExecute() {
-      if (commits > 0) {
-        expect(foregroundCompleted).toBe(true);
-      }
-    },
-  });
-  try {
-    const completed = observeMaintenanceCompletion(storePath);
-    kickSessionEntryMaintenanceAfterWrite(request);
-    await completed(signal);
-    expect(plans.map((plan) => plan.capArchived).filter(Boolean)).toEqual([64, 16]);
-    expect(loadSessionEntry({ storePath, sessionKey })?.label).toBe(
-      "foreground between cap batches",
+    // The first automatic batch leaves 116 entries, below high-water 125 but above cap 100.
+    expect(plans.filter((plan) => plan.capArchived > 0).map((plan) => plan.capArchived)).toEqual(
+      owner === "protected" ? [] : owner === "inline" ? [80] : [64, 16],
     );
-    expect(loadSessionEntry({ storePath, sessionKey: protectedKey })?.archivedAt).toBeUndefined();
-    const archived = batch.archivedKeys();
-    expect(archived).toEqual(keys.slice(0, 81).filter((key) => key !== protectedKey));
+    const archived = keys.filter(
+      (key) => loadSessionEntry({ storePath, sessionKey: key })?.archivedAt,
+    );
+    expect(archived).toEqual(owner === "protected" ? [] : keys.slice(0, 80));
     expect(loadSessionEntry({ storePath, sessionKey })?.archivedAt).toBeUndefined();
     expect(plans.flatMap((plan) => plan.archivedEntries.map((entry) => entry.sessionKey))).toEqual(
       archived,
     );
-  } finally {
-    unregister();
-  }
-});
+  },
+);
+
+it.for(["victim", "remaining"] as const)(
+  "releases the cap writer between batches and honors new protection (%s)",
+  async (protection, { signal }) => {
+    let protectedKeys: string[] = [];
+    let releases = 0;
+    let foreground: Promise<unknown> | undefined;
+    const { request, storePath, keys, plans } = createCapBatchStore(false, async () => {
+      if (++releases === 1) {
+        protectedKeys = protection === "remaining" ? [sessionKey, ...keys.slice(64)] : [keys[64]!];
+        await withinTest(foreground!, signal);
+      }
+    });
+    const protectedKey = keys[64]!;
+    const unregister = registerSessionMaintenancePreserveKeysProvider(async () => ({
+      capture: () => protectedKeys,
+      dispose() {},
+    }));
+    let commits = 0;
+    let foregroundCompleted = false;
+    observeSessionMaintenancePlanningWorker({
+      afterExecute(result) {
+        if (result.kind === "committed" && ++commits === 1) {
+          // Queue under the first operation; await only after its FIFO custody is released.
+          foreground = patchSessionEntryCore(
+            { storePath, sessionKey },
+            () => ({ label: "foreground between cap batches" }),
+            { skipMaintenance: true },
+          ).then(() => {
+            foregroundCompleted = true;
+          });
+        }
+      },
+      beforeExecute() {
+        if (commits > 0) {
+          expect(foregroundCompleted).toBe(true);
+        }
+      },
+    });
+    try {
+      const completed = observeMaintenanceCompletion(storePath);
+      kickSessionEntryMaintenanceAfterWrite(request);
+      await completed(signal);
+      expect(plans.filter((plan) => plan.capArchived > 0).map((plan) => plan.capArchived)).toEqual(
+        protection === "remaining" ? [64] : [64, 16],
+      );
+      if (protection === "remaining") {
+        expect(plans.at(-1)).toMatchObject({ capped: 0, archived: 0, entryRemovals: [] });
+      }
+      expect(loadSessionEntry({ storePath, sessionKey })?.label).toBe(
+        "foreground between cap batches",
+      );
+      expect(loadSessionEntry({ storePath, sessionKey: protectedKey })?.archivedAt).toBeUndefined();
+      const archived = keys.filter(
+        (key) => loadSessionEntry({ storePath, sessionKey: key })?.archivedAt,
+      );
+      expect(archived).toEqual(
+        protection === "remaining"
+          ? keys.slice(0, 64)
+          : keys.slice(0, 81).filter((key) => key !== protectedKey),
+      );
+    } finally {
+      unregister();
+    }
+  },
+);
 
 it("keeps the first cap receipt and stops later batches when maintenance authority retires", async ({
   signal,
 }) => {
   const retired = createDeferred();
   let releases = 0;
-  const { database, request, keys, plans, archivedKeys } = createCapBatchStore(() => {
+  const { database, request, storePath, keys, plans } = createCapBatchStore(false, () => {
     if (++releases === 1) {
       markGatewayRestartDraining();
       retired.resolve();
@@ -163,5 +216,8 @@ it("keeps the first cap receipt and stops later batches when maintenance authori
   await withinTest(retired.promise, signal);
   await closeOpenClawAgentDatabaseByPathAsync(database.path);
   expect(plans.map((plan) => plan.capArchived)).toEqual([64]);
-  expect(archivedKeys()).toEqual(keys.slice(0, 64));
+  const archived = keys.filter(
+    (key) => loadSessionEntry({ storePath, sessionKey: key })?.archivedAt,
+  );
+  expect(archived).toEqual(keys.slice(0, 64));
 });

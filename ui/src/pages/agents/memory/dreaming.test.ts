@@ -203,7 +203,10 @@ describe("dreaming controller", () => {
   it("skips wiki import insights when the gateway does not advertise the method", async () => {
     const { state, request } = createState();
     state.hello = gatewayHelloForMethods(["doctor.memory.status"], []);
-    state.configSnapshot = createMemoryWikiConfigSnapshot();
+    state.configSnapshot = {
+      hash: "hash-1",
+      config: { plugins: { entries: { "memory-wiki": { enabled: true } } } },
+    };
     state.wikiImportInsights = {
       sourceType: "chatgpt",
       totalItems: 1,
@@ -285,7 +288,7 @@ describe("dreaming controller", () => {
     const ok = await updateDreamingEnabled(state, config, true);
 
     expect(ok).toBe(true);
-    expect(getConfigPatchRawPayload(config)).toEqual({
+    expect(vi.mocked(config.patch).mock.calls[0]?.[0]?.raw).toEqual({
       plugins: {
         entries: {
           "memory-core": {

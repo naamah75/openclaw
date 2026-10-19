@@ -18,6 +18,7 @@ vi.mock("../agents/agent-scope.js", () => ({
   listAgentIds: vi.fn(),
   resolveAgentWorkspaceDir: vi.fn(),
 }));
+// mock-isolation: this boundary must reject any attempt to open SQLite on the host.
 vi.mock("../infra/node-sqlite.js", () => ({ openNodeSqliteDatabase: mocks.forbiddenSqlite }));
 vi.mock("../state/openclaw-state-worker-store.js", () => ({
   executeOpenClawStateWorker: mocks.execute,

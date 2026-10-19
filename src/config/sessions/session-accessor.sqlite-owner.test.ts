@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { observeHostDataSql } from "../../../test/helpers/sqlite-statement-execution-counter.js";
 import {
   FIRST_USE_ADDITIVE_AGENT_COLUMN_DEFINITIONS,
@@ -20,52 +20,38 @@ import {
 } from "./session-accessor.js";
 import { retainPreparedSessionEntryPredicate } from "./session-accessor.sqlite-entry-cache-publication-state.js";
 import { assignSessionOwnerInWorker } from "./session-metadata-write.async.js";
-import type { SessionEntry } from "./types.js";
 
 afterEach(() => {
   closeOpenClawAgentDatabasesForTest();
 });
 
-async function withOwnerSession(
-  run: (
-    scope: { agentId: string; env: NodeJS.ProcessEnv; sessionKey: string },
-    entry: SessionEntry,
-  ) => Promise<void>,
-  overrides: Partial<SessionEntry> = {},
-) {
-  await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
-    setRuntimeConfigSnapshot({});
-    const scope = { agentId: "main", env: state.env, sessionKey: "agent:main:owner-test" };
-    const entry: SessionEntry = {
-      sessionId: "owner-test",
-      updatedAt: 1,
-      lifecycleRevision: "original-generation",
-      createdActor: { type: "human", source: "profile", id: "profile-creator" },
-      ...overrides,
-    };
-    await upsertSessionEntryCore(scope, entry);
-    await run(scope, entry);
-  });
-}
-
-function ownerAssignment(id = "profile-assigner") {
-  return {
-    actor: { type: "agent" as const, id: "research" },
-    assignedBy: { type: "human" as const, id },
-    assignedAt: 1234,
-  };
-}
-function ownerParams({ actor: owner, ...assignment }: ReturnType<typeof ownerAssignment>) {
-  return { owner, ...assignment };
-}
-
-it("guards incognito owner assignments without querying session rows", async () => {
-  await withOwnerSession(
-    async (scope, entry) => {
+describe("SQLite session owner assignment", () => {
+  it("guards incognito owner assignments without querying session rows", async () => {
+    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+      setRuntimeConfigSnapshot({});
+      const scope = {
+        agentId: "main",
+        env: state.env,
+        sessionKey: "agent:main:dashboard:incognito-owner",
+      };
+      const entry = {
+        sessionId: "incognito-owner",
+        updatedAt: 1,
+        lifecycleRevision: "original-generation",
+        incognito: true as const,
+        createdActor: { type: "human" as const, source: "profile" as const, id: "creator" },
+      };
+      await upsertSessionEntryCore(scope, entry);
       const sql = observeHostDataSql();
-      const assignment = ownerAssignment("profile-creator");
+      const assignment = {
+        actor: { type: "agent" as const, id: "research" },
+        assignedBy: { type: "human" as const, id: "creator" },
+        assignedAt: 1234,
+      };
       const params = {
-        ...ownerParams(assignment),
+        owner: assignment.actor,
+        assignedBy: assignment.assignedBy,
+        assignedAt: assignment.assignedAt,
         expectedSessionId: entry.sessionId,
         expectedEntry: entry,
       };
@@ -79,42 +65,62 @@ it("guards incognito owner assignments without querying session rows", async () 
         sql.restore();
       }
       expect(loadSessionEntry(scope)?.owner).toEqual(assignment);
-    },
-    { incognito: true },
-  );
-});
-
-it("refuses stale session identity and lifecycle before assigning an owner", async () => {
-  await withOwnerSession(async (scope) => {
-    const expectedEntry = loadSessionEntry(scope)!;
-    const assignment = {
-      owner: { type: "agent" as const, id: "research" },
-      assignedBy: { type: "human" as const, id: "profile-assigner" },
-    };
-    expect(() =>
-      assignSessionOwner(scope, { ...assignment, expectedSessionId: "session-replaced" }),
-    ).toThrow("session changed before owner assignment");
-    expect(loadSessionEntry(scope)?.owner).toBeUndefined();
-
-    await upsertSessionEntryCore(scope, {
-      ...expectedEntry,
-      lifecycleRevision: "replacement-generation",
     });
-    expect(() =>
-      assignSessionOwner(scope, {
-        ...assignment,
-        expectedSessionId: expectedEntry.sessionId,
-        expectedEntry,
-      }),
-    ).toThrow("session ownership changed before owner assignment");
-    expect(loadSessionEntry(scope)?.owner).toBeUndefined();
   });
-});
 
-it("lazily adds bare columns and preserves the assignment across reopen", async () => {
-  await withOwnerSession(
-    async (scope) => {
-      const initial = openOpenClawAgentDatabase(scope);
+  it("refuses stale session identity and lifecycle before assigning an owner", async () => {
+    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+      setRuntimeConfigSnapshot({});
+      const scope = {
+        agentId: "main",
+        env: state.env,
+        sessionKey: "agent:main:guarded-owner",
+      };
+      await upsertSessionEntryCore(scope, {
+        sessionId: "session-original",
+        updatedAt: 1,
+        lifecycleRevision: "original-generation",
+        createdActor: { type: "human", source: "profile", id: "profile-creator" },
+      });
+      const expectedEntry = loadSessionEntry(scope)!;
+      const assignment = {
+        owner: { type: "agent" as const, id: "research" },
+        assignedBy: { type: "human" as const, id: "profile-assigner" },
+      };
+      expect(() =>
+        assignSessionOwner(scope, { ...assignment, expectedSessionId: "session-replaced" }),
+      ).toThrow("session changed before owner assignment");
+      expect(loadSessionEntry(scope)?.owner).toBeUndefined();
+
+      await upsertSessionEntryCore(scope, {
+        ...expectedEntry,
+        lifecycleRevision: "replacement-generation",
+      });
+      expect(() =>
+        assignSessionOwner(scope, {
+          ...assignment,
+          expectedSessionId: expectedEntry.sessionId,
+          expectedEntry,
+        }),
+      ).toThrow("session ownership changed before owner assignment");
+      expect(loadSessionEntry(scope)?.owner).toBeUndefined();
+    });
+  });
+
+  it("lazily adds bare columns and preserves the assignment across reopen", async () => {
+    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+      setRuntimeConfigSnapshot({});
+      const scope = {
+        agentId: "main",
+        env: state.env,
+        sessionKey: "agent:main:owned-session",
+      };
+      await upsertSessionEntryCore(scope, {
+        sessionId: "session-owned",
+        updatedAt: 1,
+        createdActor: { type: "human", source: "profile", id: "profile-creator" },
+      });
+      const initial = openOpenClawAgentDatabase({ agentId: "main", env: state.env });
       for (const { columnName, tableName } of FIRST_USE_ADDITIVE_AGENT_COLUMN_DEFINITIONS) {
         initial.db.exec(`ALTER TABLE ${tableName} DROP COLUMN ${columnName};`);
       }
@@ -127,21 +133,28 @@ it("lazily adds bare columns and preserves the assignment across reopen", async 
       expect(loadSessionEntry(scope)?.owner).toBeUndefined();
 
       expect(() =>
-        runOpenClawAgentWriteTransaction(() => {
-          expect(
-            assignSessionOwner(scope, {
-              owner: { type: "agent", id: "rolled-back-owner" },
-              assignedBy: { type: "human", id: "profile-assigner" },
-              assignedAt: 1233,
-            }),
-          ).not.toBeNull();
-          throw new Error("roll back owner schema");
-        }, scope),
+        runOpenClawAgentWriteTransaction(
+          () => {
+            expect(
+              assignSessionOwner(scope, {
+                owner: { type: "agent", id: "rolled-back-owner" },
+                assignedBy: { type: "human", id: "profile-assigner" },
+                assignedAt: 1233,
+              }),
+            ).not.toBeNull();
+            throw new Error("roll back owner schema");
+          },
+          { agentId: "main", env: state.env },
+        ),
       ).toThrow("roll back owner schema");
       expect(loadSessionEntry(scope)?.owner).toBeUndefined();
 
-      const assignment = ownerAssignment();
-      const database = openOpenClawAgentDatabase(scope);
+      const assignment = {
+        actor: { type: "agent" as const, id: "research" },
+        assignedBy: { type: "human" as const, id: "profile-assigner" },
+        assignedAt: 1234,
+      };
+      const database = openOpenClawAgentDatabase({ agentId: "main", env: state.env });
       const identity = readOpenClawAgentDatabaseIdentity(database).identity;
       if (typeof identity !== "string") {
         throw new Error("Expected a physical owner-assignment database");
@@ -154,7 +167,13 @@ it("lazily adds bare columns and preserves the assignment across reopen", async 
       });
       try {
         expect(predicate.isCurrent()).toBe(true);
-        expect(assignSessionOwner(scope, ownerParams(assignment))).toEqual(assignment);
+        expect(
+          assignSessionOwner(scope, {
+            owner: assignment.actor,
+            assignedBy: assignment.assignedBy,
+            assignedAt: assignment.assignedAt,
+          }),
+        ).toEqual(assignment);
         expect(predicate.isCurrent()).toBe(false);
       } finally {
         predicate.release();
@@ -164,8 +183,13 @@ it("lazily adds bare columns and preserves the assignment across reopen", async 
       await closeOpenClawAgentDatabasesAsync();
       closeOpenClawAgentDatabasesForTest();
       expect(loadSessionEntry(scope)?.owner).toEqual(assignment);
-      const reopened = openOpenClawAgentDatabase(scope);
-      const columns = reopened.db.prepare("PRAGMA table_info(session_nodes)").all();
+      const reopened = openOpenClawAgentDatabase({ agentId: "main", env: state.env });
+      const columns = reopened.db.prepare("PRAGMA table_info(session_nodes)").all() as Array<{
+        name: string;
+        notnull: number;
+        dflt_value: unknown;
+        type: string;
+      }>;
       expect(columns.some((column) => column.name === "legacy_acp_migration_json")).toBe(false);
       for (const definition of SESSION_OWNER_COLUMN_DEFINITIONS) {
         expect(columns.find((column) => column.name === definition.columnName)).toMatchObject({
@@ -174,7 +198,6 @@ it("lazily adds bare columns and preserves the assignment across reopen", async 
           dflt_value: null,
         });
       }
-    },
-    { lifecycleRevision: undefined },
-  );
+    });
+  });
 });

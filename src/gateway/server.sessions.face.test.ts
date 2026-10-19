@@ -21,7 +21,11 @@ type BoardSession = Pick<SessionEntry, "boardFace" | "boardPresentation"> & { ke
 type BoardList = { sessions: BoardSession[]; totalCount: number };
 type Client = Awaited<ReturnType<typeof openClient>>["ws"];
 
-async function request<T>(ws: Client, method: string, params: Record<string, unknown>) {
+async function request<T extends Record<string, unknown>>(
+  ws: Client,
+  method: string,
+  params: Record<string, unknown>,
+) {
   const result = await rpcReq<T>(ws, method, params);
   expect(result.ok, JSON.stringify(result.error)).toBe(true);
   return result.payload!;
