@@ -385,7 +385,13 @@ describe("MCP manager creation ownership", () => {
 
   it("counts requester creation and physical cleanup until closure completes", async () => {
     const held = holdFactory();
-    const factory = vi.fn<CreateSessionMcpRuntime>(createRuntimeFixture);
+    const catalog = await makeRuntime({
+      sessionId: "bounded-0",
+      requesterSenderId: "sender",
+    }).getCatalog();
+    const factory = vi.fn<CreateSessionMcpRuntime>((input) =>
+      Object.assign(createRuntimeFixture(input), { getCatalog: async () => catalog }),
+    );
     const manager = createManager(factory);
     const leases: RequesterScopedMcpRuntimeHandle[] = [];
     await withRequesterResolver(async () => {
@@ -397,11 +403,7 @@ describe("MCP manager creation ownership", () => {
           }))!,
         );
       }
-      const catalog = await makeRuntime({
-        sessionId: "bounded-0",
-        requesterSenderId: "sender",
-      }).getCatalog();
-      manager.rememberAdvertisedScopedCatalog(leases[0]!, catalog);
+      manager.rememberAdvertisedScopedCatalog(leases[0]!, await leases[0]!.runtime.getCatalog());
       factory.mockImplementationOnce(held.createRuntime);
       const pending = manager.acquireRequesterScoped({
         ...requesterParams("sender"),

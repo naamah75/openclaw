@@ -10,7 +10,10 @@ import type { GatewayScheduler, GatewayScheduledJob } from "../infra/gateway-sch
 import { logWarn } from "../logger.js";
 import { enqueueKeyedTask } from "../plugin-sdk/keyed-async-queue.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
-import { compareMcpCatalogTools, mcpCatalogToolsSignature } from "./agent-bundle-mcp-names.js";
+import {
+  createSessionMcpCatalogStore,
+  type SessionMcpCatalogStore,
+} from "./agent-bundle-mcp-manager-catalog.js";
 import { sessionMcpRuntimeOwners } from "./agent-bundle-mcp-runtime-owner.js";
 import {
   SessionMcpRuntimeCapacityError,
@@ -18,14 +21,7 @@ import {
   SESSION_MCP_RUNTIME_SWEEP_INTERVAL_MS,
   type CreateSessionMcpRuntime,
 } from "./agent-bundle-mcp-runtime-shared.js";
-import type {
-  McpCatalogTool,
-  McpServerCatalog,
-  McpToolCatalog,
-  RequesterScopedMcpRuntimeHandle,
-  SessionMcpConfigReload,
-  SessionMcpRuntime,
-} from "./agent-bundle-mcp-types.js";
+import type { SessionMcpConfigReload, SessionMcpRuntime } from "./agent-bundle-mcp-types.js";
 import { recordAgentCleanupFailure } from "./run-cleanup-timeout.js";
 
 // Gateway shutdown preparation and CLI command imports load this before turns.
@@ -35,24 +31,6 @@ const CAPACITY_CLEANUP_WAIT_MS = 5_000;
 
 export type SessionMcpConfigPublication = SessionMcpConfigReload & { pluginGeneration: number };
 
-type AdvertisedScopedCatalogEntry = {
-  configFingerprint: string;
-  servers: Map<string, McpServerCatalog>;
-  toolsByServer: Map<string, McpCatalogTool[]>;
-  signaturesByServer: Map<string, string>;
-};
-
-type StaticCatalogBinding = {
-  sessionId: string;
-  sessionKey?: string;
-  agentId?: string;
-  workspaceDir: string;
-  agentDir?: string;
-  configFingerprint: string;
-};
-
-type StaticCatalogEntry = StaticCatalogBinding & { catalog: McpToolCatalog | null };
-
 type RuntimeDisposalReceipt = {
   sessionId: string;
   pending: Set<Promise<void>>;
@@ -60,7 +38,7 @@ type RuntimeDisposalReceipt = {
   agentId?: string;
 };
 
-type SessionMcpRuntimeManagerStore = {
+type SessionMcpRuntimeManagerStore = SessionMcpCatalogStore & {
   configReload?: SessionMcpConfigPublication;
   runtimesBySessionId: Map<string, SessionMcpRuntime>;
   sessionIdBySessionKey: Map<string, string>;
@@ -68,8 +46,6 @@ type SessionMcpRuntimeManagerStore = {
   // Reset/delete retirement survives late creation or reuse by the stopping run.
   requiredRetirementSessionIds: Set<string>;
   connectionMetaByRuntimeKey: Map<string, { connectionHash: string; resolvedAt: number }>;
-  advertisedScopedCatalogBySessionId: Map<string, AdvertisedScopedCatalogEntry>;
-  staticCatalogBySessionId: Map<string, StaticCatalogEntry>;
   runtimeWorkChains: Map<string, Promise<unknown>>;
   disposalInFlight?: Promise<void>;
   pendingDisposals: Map<string, RuntimeDisposalReceipt>;
@@ -106,21 +82,17 @@ export function createSessionMcpRuntimeManagerLifecycle(
   options: SessionMcpRuntimeManagerOpts,
   createSessionMcpRuntime: CreateSessionMcpRuntime,
 ) {
+  const runtimesBySessionId = new Map<string, SessionMcpRuntime>();
+  const catalogs = createSessionMcpCatalogStore(runtimesBySessionId, () => store.scheduler.now());
   const store: SessionMcpRuntimeManagerStore = {
+    ...catalogs.store,
     // Keys are bare sessionId for static runtimes, or requester composite JSON keys.
-    runtimesBySessionId: new Map<string, SessionMcpRuntime>(),
+    runtimesBySessionId,
     sessionIdBySessionKey: new Map<string, string>(),
     deferredRetirementSessionIds: new Set<string>(),
     requiredRetirementSessionIds: new Set<string>(),
     // Manager-side only: connection hash + resolve time. Never stores raw url/headers.
     connectionMetaByRuntimeKey: new Map(),
-    /**
-     * Session-stable advertised catalogs for requester-scoped servers.
-     * Keyed by sessionId → serverName. Specs must not vary per sender or shared
-     * Codex threads rotate (dynamicToolsFingerprint churn).
-     */
-    advertisedScopedCatalogBySessionId: new Map(),
-    staticCatalogBySessionId: new Map(),
     /**
      * Per-runtimeKey serialization for acquisition and dispose.
      * Sections never overlap for one key, so a slow resolve cannot clobber a newer install.
@@ -285,32 +257,32 @@ export function createSessionMcpRuntimeManagerLifecycle(
         parseRuntimeCacheSessionId,
       ),
     ]);
+    const activeSessionIds = new Set<string>();
     for (const runId of listLiveAgentRunIds()) {
       if (hasAgentRunContextExecutionOwner(runId)) {
         const run = getAgentRunContext(runId);
         const sessionId = run?.sessionId ?? store.sessionIdBySessionKey.get(run?.sessionKey ?? "");
         if (sessionId) {
           ownedSessionIds.add(sessionId);
+          activeSessionIds.add(sessionId);
         }
       }
     }
-    // Map order tracks last acquisition, including refused reuse. Live owners are
-    // exempt; keep only one runtime-cap's worth of evicted session snapshots.
-    const evicted: string[] = [];
-    for (const [sessionId, entry] of store.staticCatalogBySessionId) {
-      if (!ownedSessionIds.has(sessionId)) {
-        if (entry.catalog) {
-          evicted.push(sessionId);
-        } else {
-          store.staticCatalogBySessionId.delete(sessionId);
-        }
-      }
-    }
-    for (const sessionId of evicted.slice(0, -SESSION_MCP_MAX_LIVE_RUNTIMES)) {
-      store.staticCatalogBySessionId.delete(sessionId);
-    }
+    catalogs.prune(
+      ownedSessionIds,
+      new Set([
+        ...store.runtimesBySessionId.keys(),
+        ...store.runtimeWorkChains.keys(),
+        ...store.pendingDisposals.keys(),
+      ]),
+      activeSessionIds,
+    );
+    const retainedSessionIds = new Set([
+      ...[...store.catalogByRuntimeKey.values()].map((entry) => entry.sessionId),
+      ...store.advertisedScopedCatalogBySessionId.keys(),
+    ]);
     for (const [sessionKey, sessionId] of store.sessionIdBySessionKey) {
-      if (!ownedSessionIds.has(sessionId) && !store.staticCatalogBySessionId.has(sessionId)) {
+      if (!ownedSessionIds.has(sessionId) && !retainedSessionIds.has(sessionId)) {
         store.sessionIdBySessionKey.delete(sessionKey);
       }
     }
@@ -474,7 +446,7 @@ export function createSessionMcpRuntimeManagerLifecycle(
       preserveRequiredRetirement?: boolean;
       requireStoppedScheduler?: boolean;
       expectedRuntimes?: ReadonlyMap<string, SessionMcpRuntime>;
-      expectedStaticCatalog?: StaticCatalogEntry;
+      catalogsAreCurrent?: () => boolean;
       preserveActiveLeases?: boolean;
       assertCurrent?: () => void;
       agentDeletion?: {
@@ -505,11 +477,7 @@ export function createSessionMcpRuntimeManagerLifecycle(
       await priorDisposal;
       opts?.assertCurrent?.();
       const expectedRuntimes = opts?.expectedRuntimes;
-      if (
-        opts?.expectedStaticCatalog &&
-        (sessionId === undefined ||
-          store.staticCatalogBySessionId.get(sessionId) !== opts.expectedStaticCatalog)
-      ) {
+      if (opts?.catalogsAreCurrent && !opts.catalogsAreCurrent()) {
         return;
       }
       if (
@@ -536,8 +504,11 @@ export function createSessionMcpRuntimeManagerLifecycle(
       const deletion = opts?.agentDeletion;
       if (deletion) {
         deletion.assertCurrent();
-        const staticCatalog = store.staticCatalogBySessionId.get(sessionId ?? "");
-        if (staticCatalog && staticCatalog.agentId !== deletion.agentId) {
+        if (
+          catalogs
+            .sessionEntries(sessionId ?? "")
+            .some((entry) => entry.agentId !== deletion.agentId)
+        ) {
           return;
         }
         const failed = runtimeKeys
@@ -576,15 +547,13 @@ export function createSessionMcpRuntimeManagerLifecycle(
         store.sessionIdBySessionKey.clear();
         store.deferredRetirementSessionIds.clear();
         store.requiredRetirementSessionIds.clear();
-        store.advertisedScopedCatalogBySessionId.clear();
-        store.staticCatalogBySessionId.clear();
+        catalogs.clear();
       } else {
         store.deferredRetirementSessionIds.delete(sessionId);
         if (opts?.preserveRequiredRetirement !== true) {
           store.requiredRetirementSessionIds.delete(sessionId);
         }
-        store.advertisedScopedCatalogBySessionId.delete(sessionId);
-        store.staticCatalogBySessionId.delete(sessionId);
+        catalogs.deleteSession(sessionId);
       }
       const outcomes = await Promise.allSettled([
         ...previousDisposals,
@@ -628,118 +597,6 @@ export function createSessionMcpRuntimeManagerLifecycle(
     });
   };
 
-  const reconcileStaticCatalog = (binding: StaticCatalogBinding): void => {
-    const current = store.staticCatalogBySessionId.get(binding.sessionId);
-    if (
-      current &&
-      (current.configFingerprint !== binding.configFingerprint ||
-        current.workspaceDir !== binding.workspaceDir ||
-        current.agentDir !== binding.agentDir ||
-        current.agentId !== binding.agentId ||
-        current.sessionKey !== binding.sessionKey)
-    ) {
-      store.staticCatalogBySessionId.delete(binding.sessionId);
-    } else if (current) {
-      store.staticCatalogBySessionId.delete(binding.sessionId);
-      store.staticCatalogBySessionId.set(binding.sessionId, current);
-    }
-  };
-
-  const observedStaticRuntimes = new WeakSet<SessionMcpRuntime>();
-  const observeStaticCatalog = (runtime: SessionMcpRuntime, binding: StaticCatalogBinding) => {
-    reconcileStaticCatalog(binding);
-    if (!store.staticCatalogBySessionId.has(binding.sessionId)) {
-      store.staticCatalogBySessionId.set(binding.sessionId, { ...binding, catalog: null });
-    }
-    if (observedStaticRuntimes.has(runtime)) {
-      return;
-    }
-    observedStaticRuntimes.add(runtime);
-    const getCatalog = runtime.getCatalog.bind(runtime);
-    runtime.getCatalog = async () => {
-      const publication = store.staticCatalogBySessionId.get(runtime.sessionId);
-      const catalog = await getCatalog();
-      // Retain schemas across eviction, never late results from a replaced/reset owner.
-      if (
-        publication &&
-        store.staticCatalogBySessionId.get(runtime.sessionId) === publication &&
-        store.runtimesBySessionId.get(runtime.sessionId) === runtime &&
-        sessionMcpRuntimeOwners.get(runtime)?.isCurrent() !== false
-      ) {
-        publication.catalog = catalog;
-      }
-      return catalog;
-    };
-  };
-
-  const rememberAdvertisedScopedCatalog = (
-    handle: RequesterScopedMcpRuntimeHandle,
-    catalog: McpToolCatalog,
-  ): void => {
-    const { runtime, advertisedCatalogConfigFingerprint } = handle;
-    // Config reconciliation replaces the cache; publish only for its matching config.
-    const entry = store.advertisedScopedCatalogBySessionId.get(runtime.sessionId);
-    if (entry?.configFingerprint !== advertisedCatalogConfigFingerprint) {
-      return;
-    }
-    const toolsByServerName = new Map<string, McpCatalogTool[]>();
-    for (const tool of catalog.tools) {
-      const list = toolsByServerName.get(tool.serverName) ?? [];
-      list.push(tool);
-      toolsByServerName.set(tool.serverName, list);
-    }
-    for (const [serverName, server] of Object.entries(catalog.servers)) {
-      const tools = (toolsByServerName.get(serverName) ?? []).toSorted((a, b) =>
-        a.toolName.localeCompare(b.toolName),
-      );
-      const signature = mcpCatalogToolsSignature(tools);
-      // Identity compare: overwrite only when the listed tool surface changes.
-      if (entry.signaturesByServer.get(serverName) === signature) {
-        continue;
-      }
-      entry.servers.set(serverName, server);
-      entry.toolsByServer.set(serverName, tools);
-      entry.signaturesByServer.set(serverName, signature);
-    }
-  };
-
-  const getAdvertisedScopedCatalog = (sessionId: string): McpToolCatalog | null => {
-    const entry = store.advertisedScopedCatalogBySessionId.get(sessionId);
-    if (!entry || entry.servers.size === 0) {
-      return null;
-    }
-    const servers: Record<string, McpServerCatalog> = {};
-    const tools: McpCatalogTool[] = [];
-    for (const serverName of [...entry.servers.keys()].toSorted((a, b) => a.localeCompare(b))) {
-      servers[serverName] = entry.servers.get(serverName)!;
-      tools.push(...(entry.toolsByServer.get(serverName) ?? []));
-    }
-    tools.sort(compareMcpCatalogTools);
-    return {
-      version: 1,
-      generatedAt: store.scheduler.now(),
-      servers,
-      tools,
-    };
-  };
-
-  const reconcileAdvertisedScopedCatalogConfig = (
-    sessionId: string,
-    fingerprint: string,
-    preparePublication: boolean,
-  ): void => {
-    const current = store.advertisedScopedCatalogBySessionId.get(sessionId);
-    if (current?.configFingerprint === fingerprint || (!current && !preparePublication)) {
-      return;
-    }
-    store.advertisedScopedCatalogBySessionId.set(sessionId, {
-      configFingerprint: fingerprint,
-      servers: new Map(),
-      toolsByServer: new Map(),
-      signaturesByServer: new Map(),
-    });
-  };
-
   return {
     store,
     runtimeKeysForSessionId,
@@ -754,10 +611,6 @@ export function createSessionMcpRuntimeManagerLifecycle(
     ensureIdleSweepTimer,
     disposeRuntimeKeyNow,
     disposeManagedRuntimes,
-    reconcileStaticCatalog,
-    observeStaticCatalog,
-    rememberAdvertisedScopedCatalog,
-    getAdvertisedScopedCatalog,
-    reconcileAdvertisedScopedCatalogConfig,
+    catalogs,
   };
 }

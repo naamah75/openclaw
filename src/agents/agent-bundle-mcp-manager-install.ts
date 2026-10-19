@@ -9,6 +9,7 @@ import { loadSessionMcpConfig } from "./agent-bundle-mcp-runtime-config.js";
 import { sessionMcpRuntimeOwners } from "./agent-bundle-mcp-runtime-owner.js";
 import {
   resolveSessionMcpRuntimeIdleTtlMs,
+  SessionMcpRuntimeCapacityError,
   type CreateSessionMcpRuntime,
 } from "./agent-bundle-mcp-runtime-shared.js";
 import type {
@@ -39,6 +40,10 @@ type RequesterRuntimeParams = RuntimeEntryParams & {
   agentAccountId?: string | null;
   messageChannel?: string | null;
   requesterScope: SessionMcpRequesterScope;
+  onCapacityRefusal: (
+    error: SessionMcpRuntimeCapacityError,
+    requesterConnect: RequesterMcpConnect | undefined,
+  ) => SessionMcpRuntime;
 };
 
 const matchesRuntime = (
@@ -75,6 +80,16 @@ export function createSessionMcpRuntimeManagerInstall(
       slot.idleTtlMs = resolveSessionMcpRuntimeIdleTtlMs(store.configReload?.cfg ?? params.cfg);
     }
     lifecycle.ensureIdleSweepTimer();
+    if (slot && store.liveRuntimeSlots.has(slot)) {
+      lifecycle.catalogs.observeCatalog(runtime, params.runtimeKey, {
+        sessionId,
+        sessionKey: params.sessionKey,
+        agentId: params.agentId ?? parseAgentSessionKey(params.sessionKey ?? "")?.agentId,
+        workspaceDir: params.workspaceDir,
+        agentDir: params.agentDir,
+        configFingerprint: runtime.configFingerprint,
+      });
+    }
     if (store.requiredRetirementSessionIds.has(sessionId)) {
       // Reset/delete retirement deliberately survives late creation and reuse;
       // otherwise a racing run could escape the required session teardown.
@@ -97,20 +112,15 @@ export function createSessionMcpRuntimeManagerInstall(
     );
     const hasServers = Object.keys(config.loaded.mcpServers).length > 0;
     const { runtimeKey, configReloadAtAdmission, ...runtimeParams } = params;
-    const staticBinding =
-      runtimeKey === params.sessionId && !params.requesterScope
-        ? {
-            sessionId: params.sessionId,
-            sessionKey: params.sessionKey,
-            agentId: params.agentId ?? parseAgentSessionKey(params.sessionKey ?? "")?.agentId,
-            workspaceDir: params.workspaceDir,
-            agentDir: params.agentDir,
-            configFingerprint: nextFingerprint,
-          }
-        : undefined;
-    if (staticBinding) {
-      lifecycle.reconcileStaticCatalog(staticBinding);
-    }
+    const catalogBinding = {
+      sessionId: params.sessionId,
+      sessionKey: params.sessionKey,
+      agentId: params.agentId ?? parseAgentSessionKey(params.sessionKey ?? "")?.agentId,
+      workspaceDir: params.workspaceDir,
+      agentDir: params.agentDir,
+      configFingerprint: nextFingerprint,
+    };
+    lifecycle.catalogs.reconcileCatalog(runtimeKey, catalogBinding);
     const existing = store.runtimesBySessionId.get(runtimeKey);
     const connectionMatches =
       !params.connectionOverrides ||
@@ -118,9 +128,6 @@ export function createSessionMcpRuntimeManagerInstall(
         hashMcpResolvedConnections(params.connectionOverrides);
     if (existing && connectionMatches && matchesRuntime(existing, params, nextFingerprint)) {
       reconcileReusableRetirement(params, existing);
-      if (staticBinding && hasServers) {
-        lifecycle.observeStaticCatalog(existing, staticBinding);
-      }
       existing.markUsed();
       return existing;
     }
@@ -163,9 +170,6 @@ export function createSessionMcpRuntimeManagerInstall(
         await lifecycle.releaseEmptyRuntimeSlot(runtimeKey, runtime);
       }
       reconcileReusableRetirement(params, runtime);
-      if (staticBinding && hasServers) {
-        lifecycle.observeStaticCatalog(runtime, staticBinding);
-      }
       runtime.markUsed();
       return runtime;
     } catch (error) {
@@ -262,25 +266,32 @@ export function createSessionMcpRuntimeManagerInstall(
       }
       return undefined;
     }
-    return await installRequesterRuntime({
-      runtimeKey: params.runtimeKey,
-      configReloadAtAdmission: params.configReloadAtAdmission,
-      sessionId: params.sessionId,
-      sessionKey: params.sessionKey,
-      agentId: params.agentId,
-      workspaceDir: params.workspaceDir,
-      agentDir: params.agentDir,
-      cfg: params.cfg,
-      manifestRegistry: params.manifestRegistry,
-      safeServerNamesByServer: params.safeServerNamesByServer,
-      includeServerNames: activeNameSet,
-      requesterConnect,
-      connectionOverrides,
-      redactConnectionServerNames: new Set(params.resolverRequesterServerNames),
-      requesterScope: params.requesterScope,
-      toolOverrides: params.toolOverrides,
-      toolDenylist: params.toolDenylist,
-    });
+    try {
+      return await installRequesterRuntime({
+        runtimeKey: params.runtimeKey,
+        configReloadAtAdmission: params.configReloadAtAdmission,
+        sessionId: params.sessionId,
+        sessionKey: params.sessionKey,
+        agentId: params.agentId,
+        workspaceDir: params.workspaceDir,
+        agentDir: params.agentDir,
+        cfg: params.cfg,
+        manifestRegistry: params.manifestRegistry,
+        safeServerNamesByServer: params.safeServerNamesByServer,
+        includeServerNames: activeNameSet,
+        requesterConnect,
+        connectionOverrides,
+        redactConnectionServerNames: new Set(params.resolverRequesterServerNames),
+        requesterScope: params.requesterScope,
+        toolOverrides: params.toolOverrides,
+        toolDenylist: params.toolDenylist,
+      });
+    } catch (error) {
+      if (error instanceof SessionMcpRuntimeCapacityError) {
+        return params.onCapacityRefusal(error, requesterConnect);
+      }
+      throw error;
+    }
   };
 
   return {

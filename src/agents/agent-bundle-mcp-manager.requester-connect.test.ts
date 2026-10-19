@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSessionMcpRuntimeManager } from "./agent-bundle-mcp-manager.test-support.js";
 import { materializeBundleMcpToolsForRun } from "./agent-bundle-mcp-materialize.js";
 import type { CreateSessionMcpRuntime } from "./agent-bundle-mcp-runtime-shared.js";
-import type { McpToolCatalog, SessionMcpRuntime } from "./agent-bundle-mcp-types.js";
+import type {
+  McpToolCatalog,
+  SessionMcpRuntime,
+  SessionMcpRuntimeLease,
+} from "./agent-bundle-mcp-types.js";
 import { applyCodeModeCatalog } from "./code-mode.js";
 import {
   createCodeModeHarness,
@@ -59,6 +63,7 @@ function createTestRuntime(params: Parameters<CreateSessionMcpRuntime>[0]): Sess
     });
   }
   let lastUsedAt = Date.now();
+  let activeLeases = 0;
   return {
     sessionId: params.sessionId,
     sessionKey: params.sessionKey,
@@ -68,6 +73,19 @@ function createTestRuntime(params: Parameters<CreateSessionMcpRuntime>[0]): Sess
     requesterScope: params.requesterScope,
     requesterConnect: params.requesterConnect,
     createdAt: Date.now(),
+    get activeLeases() {
+      return activeLeases;
+    },
+    acquireLease() {
+      activeLeases++;
+      let released = false;
+      return () => {
+        if (!released) {
+          released = true;
+          activeLeases--;
+        }
+      };
+    },
     get lastUsedAt() {
       return lastUsedAt;
     },
@@ -148,6 +166,75 @@ describe("requester MCP connect runtime", () => {
     );
     await connected.dispose();
   });
+
+  it.each(["embedded", "requester"])(
+    "preserves the current sign-in surface beside refused live tools (%s)",
+    async (consumer) => {
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+      const held: SessionMcpRuntimeLease[] = [];
+      try {
+        const input = {
+          ...request,
+          cfg: {
+            ...request.cfg,
+            mcp: {
+              servers: {
+                ...request.cfg.mcp.servers,
+                mail: { ...request.cfg.mcp.servers.calendar, url: "https://mail.example/mcp" },
+              },
+            },
+            gateway: { publicOrigin: "https://gateway.example" },
+          },
+        };
+        oauthStatus.mockResolvedValue([{ state: "authorized" }, { state: "unauthenticated" }]);
+        const acquire = async () =>
+          consumer === "embedded"
+            ? await manager.acquire(input)
+            : (await manager.acquireRequesterScoped(input))!;
+        const first = await materializeBundleMcpToolsForRun(await acquire());
+        const surface = first.tools.map(({ name, description, parameters }) => ({
+          name,
+          description,
+          parameters,
+        }));
+        expect(surface.map((tool) => tool.name)).toEqual(["calendar__events", "mail__connect"]);
+        await first.dispose();
+        for (let index = 0; index < 256; index++) {
+          held.push(
+            await manager.acquire({
+              sessionId: `busy-${index}`,
+              workspaceDir: "/workspace",
+              cfg: { mcp: { servers: { fixture: { command: "true" } } } },
+            }),
+          );
+        }
+        const count = created.length;
+        const refused = await materializeBundleMcpToolsForRun(await acquire());
+        expect(
+          refused.tools.map(({ name, description, parameters }) => ({
+            name,
+            description,
+            parameters,
+          })),
+        ).toEqual(surface);
+        expect((await refused.tools[0]!.execute("refused", {})).content).toEqual([
+          {
+            type: "text",
+            text: expect.stringContaining("This turn will continue without MCP tools"),
+          },
+        ]);
+        expect(created).toHaveLength(count);
+        expect(startAuthorization).not.toHaveBeenCalled();
+        await expect(refused.tools[1]!.execute("connect", {})).resolves.toMatchObject({
+          details: { mcpConnect: { serverName: "mail", authorizationUrl } },
+        });
+        await refused.dispose();
+      } finally {
+        held.forEach((lease) => lease.releaseLease());
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it("returns requester connection configuration failures as failed MCP guest results", async () => {
     const runtime = await manager.getOrCreate({
