@@ -775,7 +775,7 @@ export function createCommandHandlers(context: CommandHandlerContext) {
       return;
     }
     const descriptor = resolveTuiCommandDescriptor(name);
-    if (sessionTransition.active && descriptor?.name !== "exit") {
+    if (sessionTransition.active && !["exit", "stop", "abort"].includes(descriptor?.name ?? "")) {
       chatLog.addSystem(
         `session change in progress; wait for /${sessionTransition.active} to finish`,
       );

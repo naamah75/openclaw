@@ -147,9 +147,12 @@ afterEach(async () => {
 });
 
 describe("TUI startup admission", () => {
-  it.each(["new", "send"] as const)(
-    "retains a dispatched %s through Stop and a repeated submit",
-    async (action) => {
+  it.each([
+    ["new", "/stop"],
+    ["send", "/abort"],
+  ] as const)(
+    "retains a dispatched %s through %s and a repeated submit",
+    async (action, stopCommand) => {
       const fixture = createFixture(true);
       fixture.ready();
       const submit = () =>
@@ -163,10 +166,13 @@ describe("TUI startup admission", () => {
       expect(fixture.writes).toHaveLength(1);
       const firstWrite = fixture.writes[0];
       assert(firstWrite);
-      await fixture.actions.abortActive();
+      await fixture.commands.handleCommand(stopCommand);
       await vi.advanceTimersByTimeAsync(0);
       expect(settled).toBe(false);
       expect(fixture.state.activityStatus).not.toBe("aborted");
+      expect(fixture.chatLog.addSystem.mock.calls.flat()).not.toEqual(
+        expect.arrayContaining([expect.stringContaining("session change in progress")]),
+      );
       await submit();
       expect(fixture.writes).toEqual([firstWrite]);
       fixture.finishWrite();
@@ -188,14 +194,14 @@ describe("TUI startup admission", () => {
     },
   );
 
-  it("does not start a legacy creation retry after Stop", async () => {
+  it("does not start a legacy creation retry after /abort", async () => {
     const fixture = createFixture(true);
     fixture.ready();
     fixture.state.currentSessionId = "original-session";
     const originalKey = fixture.state.currentSessionKey;
     const operation = fixture.commands.handleCommand("/new");
     expect(fixture.writes).toHaveLength(1);
-    await fixture.actions.abortActive();
+    await fixture.commands.handleCommand("/abort");
     fixture.finishWrite({
       code: "INVALID_REQUEST",
       message: "invalid sessions.create params: unexpected property 'succeedsParent'",
@@ -262,23 +268,23 @@ describe("TUI startup admission", () => {
     },
   );
 
-  it.each(["send", "new"] as const)(
-    "Stop cancels a pending %s before startup becomes ready",
-    async (action) => {
-      const fixture = createFixture();
-      const operation =
-        action === "send"
-          ? fixture.commands.sendMessage("Synthetic canceled request")
-          : fixture.commands.handleCommand("/new");
-      await vi.advanceTimersByTimeAsync(35_000);
-      await fixture.actions.abortActive();
-      await operation;
-      fixture.ready();
-      await vi.advanceTimersByTimeAsync(GATEWAY_STARTUP_ADMISSION_WAIT_MS);
-      expect(fixture.writes).toHaveLength(0);
-      expect(fixture.state.pendingSubmit).toBeNull();
-    },
-  );
+  it.each([
+    ["send", "/stop"],
+    ["new", "/abort"],
+  ] as const)("%s is canceled by %s before startup becomes ready", async (action, stopCommand) => {
+    const fixture = createFixture();
+    const operation =
+      action === "send"
+        ? fixture.commands.sendMessage("Synthetic canceled request")
+        : fixture.commands.handleCommand("/new");
+    await vi.advanceTimersByTimeAsync(35_000);
+    await fixture.commands.handleCommand(stopCommand);
+    fixture.ready();
+    await vi.advanceTimersByTimeAsync(GATEWAY_STARTUP_ADMISSION_WAIT_MS);
+    await operation;
+    expect(fixture.writes).toHaveLength(0);
+    expect(fixture.state.pendingSubmit).toBeNull();
+  });
 
   it.each(["send", "new"] as const)(
     "navigation cancels a pending %s on the old session",
