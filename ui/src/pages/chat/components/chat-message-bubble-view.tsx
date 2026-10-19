@@ -5,11 +5,14 @@ import {
   createMemo,
   For,
   Match,
+  Repeat,
   Show,
   Switch,
   onCleanup,
   type Accessor,
+  refresh,
   untrack,
+  useContext,
 } from "solid-js";
 import { readNodePermissionRequest } from "../../../../../packages/gateway-protocol/src/node-permissions.js";
 import { toSanitizedMarkdownHtml } from "../../../components/markdown.ts";
@@ -22,7 +25,7 @@ import { PluginSurface } from "../../../plugins/control-ui-view.solid.tsx";
 import { assistantMessageIsInterrupted } from "../chat-assistant-reply.ts";
 import { usePanePresentation } from "../chat-pane-presentation.ts";
 import { AsyncQuestionSummary } from "./chat-async-question-summary.tsx";
-import "../../../components/person-reference.ts";
+import "../../../components/solid/person-reference.tsx";
 import { ChatBubbleActivity } from "./chat-bubble-activity-view.tsx";
 import { ChatPermissionCard } from "./chat-divider.tsx";
 import { ActivityOperation } from "./chat-message-activity-operation.tsx";
@@ -42,7 +45,12 @@ import "./chat-clawhub-card.ts";
 import type { ChatMessageRenderPreparation } from "./chat-message-markdown-view.tsx";
 import type { MarkdownMedia, PositionedMedia } from "./chat-message-media-markdown.ts";
 import { prepareMarkdownMedia } from "./chat-message-media-markdown.ts";
-import { type AttachmentItem, schedulePairingQrExpiryRefresh } from "./chat-message-media.ts";
+import {
+  type AttachmentItem,
+  schedulePairingQrExpiryRefresh,
+  observeChatMediaResourceSubscriber,
+  releaseChatMediaResourceOwner,
+} from "./chat-message-media.ts";
 import { MarkdownText, MessageJson, MessageMarkdown } from "./chat-message-text-view.tsx";
 import { ReplyLineView } from "./chat-reply-attribution.tsx";
 import type { SidebarContent } from "./chat-sidebar-content-types.ts";
@@ -55,6 +63,7 @@ import {
 } from "./chat-tool-cards.solid.tsx";
 import { ChatToolContent, ChatToolRawOutput, ChatToolOutcome } from "./chat-tool-content.solid.tsx";
 import { toolResultSurfaceProps } from "./chat-tool-render-model.ts";
+import { TranscriptMessageElementsContext } from "./chat-transcript-message-elements.ts";
 import { WorkspaceConflictTranscriptMessage } from "./chat-workspace-conflict.ts";
 import { ToolPreview } from "./widget-card.ts";
 
@@ -76,106 +85,110 @@ type ContentProps = {
 
 /** Message identity owns text/media DOM; option refreshes only publish new facts. */
 export function GroupedMessage(props: GroupedMessageProps) {
-  const state = createMemo(() =>
-    prepareGroupedMessage(props.preparation, props.messageKey, props.options, props.onOpenSidebar),
-  );
-  let element: Element | undefined;
-  // Bind arrivals before the transcript commit consumes their pending identities.
-  let currentEntryRef = untrack(() => props.options.entryRef);
+  const refreshMedia = () => void refresh(state);
+  const state = createMemo(() => {
+    observeChatMediaResourceSubscriber(props.options.mediaOwner, refreshMedia);
+    return prepareGroupedMessage(
+      props.preparation,
+      props.messageKey,
+      props.options,
+      props.onOpenSidebar,
+    );
+  });
+  const messageElements = useContext(TranscriptMessageElementsContext);
+  // The keyed message owns this DOM registration through acknowledgement and option refreshes.
+  const initialMessageKey = untrack(() => props.messageKey);
+  const entryRef = messageElements?.forKey(initialMessageKey);
+  // Expiring pairing QR attachments schedule a timer at their resource owner.
   createEffect(
-    () => props.options.entryRef,
-    (next) => {
-      if (currentEntryRef !== next) {
-        currentEntryRef?.(undefined);
-      }
-      currentEntryRef = next;
-      if (element) {
-        currentEntryRef?.(element);
-      }
-    },
+    () => [props.messageKey, state().nextPairingQrExpiresAt] as const,
+    ([key, expiresAt]) => schedulePairingQrExpiryRefresh(key, expiresAt, refreshMedia),
   );
-  createEffect(
-    () =>
-      [props.messageKey, state().nextPairingQrExpiresAt, props.options.onRequestUpdate] as const,
-    ([key, expiresAt, requestUpdate]) =>
-      schedulePairingQrExpiryRefresh(key, expiresAt, requestUpdate),
-  );
-  onCleanup(() => currentEntryRef?.(undefined));
-  const entryRef = (next: Element) => {
-    element = next;
-    currentEntryRef?.(next);
-  };
+  onCleanup(() => releaseChatMediaResourceOwner(refreshMedia));
   return (
     <Show
       when={state().workspaceConflict}
       fallback={
         <Show when={!state().empty}>
-          <div
-            class={state().bubbleClasses}
-            ref={entryRef}
-            data-message-id={props.messageKey}
-            data-file-session-key={props.options.fileLinkSessionKey}
-            data-entry-id={props.options.entryId || undefined}
-            data-message-text={state().actionText || undefined}
-            prop:messageActions={props.options.messageActions}
-          >
-            <Show when={props.options.replyLine}>
-              <ReplyLineView line={props.options.replyLine!} actions={props.options} inline />
-            </Show>
-            <Switch>
-              <Match when={state().voiceTranscript}>
-                <ChatBubbleActivity
-                  label={t("chat.messages.voiceTranscript")}
-                  open={props.options.searchResult}
+          {(_visible) => {
+            onCleanup(() => entryRef?.(undefined));
+            return (
+              <>
+                <div
+                  class={state().bubbleClasses}
+                  ref={(element) => entryRef?.(element)}
+                  data-message-id={props.messageKey}
+                  data-file-session-key={props.options.fileLinkSessionKey}
+                  data-entry-id={props.options.entryId || undefined}
+                  data-message-text={state().actionText || undefined}
+                  prop:messageActions={props.options.messageActions}
                 >
-                  <BubbleContents
-                    state={state}
-                    messageKey={props.messageKey}
-                    options={props.options}
-                    onOpenSidebar={props.onOpenSidebar}
-                  />
-                </ChatBubbleActivity>
-              </Match>
-              <Match when={state().onlyToolCards}>
-                <InlineToolCards cards={state().toolCards} options={state().toolRenderOptions} />
-              </Match>
-              <Match when={state().isStandaloneToolMessage}>
-                <ToolMessage {...props} state={state} />
-              </Match>
-              <Match when={true}>
-                {/* Keep preparation out of this boundary so refreshes retain embedded media. */}
-                <BubbleContents
-                  state={state}
-                  messageKey={props.messageKey}
-                  options={props.options}
-                  onOpenSidebar={props.onOpenSidebar}
-                />
-              </Match>
-            </Switch>
-            <Show
-              when={
-                state().sourceRole === "assistant" && assistantMessageIsInterrupted(state().message)
-              }
-            >
-              <div
-                class="chat-tasks-status chat-turn-recap chat-turn-recap--continuation"
-                role="status"
-              >
-                {t("chat.composer.runInterrupted")}
-              </div>
-            </Show>
-            <Show when={state().duplicateCount > 1 && (!state().markdown || state().jsonResult)}>
-              <div
-                class="chat-duplicate-count"
-                aria-label={t("chat.messages.duplicatesCollapsed", {
-                  count: String(state().duplicateCount),
-                })}
-              >
-                ×{state().duplicateCount}
-              </div>
-            </Show>
-          </div>
-          <MessageWorkContext message={state().message} />
+                  <Show when={props.options.replyLine}>
+                    <ReplyLineView line={props.options.replyLine!} actions={props.options} inline />
+                  </Show>
+                  <Switch>
+                    <Match when={state().voiceTranscript}>
+                      <ChatBubbleActivity
+                        label={t("chat.messages.voiceTranscript")}
+                        open={props.options.searchResult}
+                      >
+                        <BubbleContents
+                          state={state}
+                          messageKey={props.messageKey}
+                          options={props.options}
+                          onOpenSidebar={props.onOpenSidebar}
+                        />
+                      </ChatBubbleActivity>
+                    </Match>
+                    <Match when={state().onlyToolCards}>
+                      <InlineToolCards
+                        cards={state().toolCards}
+                        options={state().toolRenderOptions}
+                      />
+                    </Match>
+                    <Match when={state().isStandaloneToolMessage}>
+                      <ToolMessage {...props} state={state} />
+                    </Match>
+                    <Match when={true}>
+                      {/* Keep preparation out of this boundary so refreshes retain embedded media. */}
+                      <BubbleContents
+                        state={state}
+                        messageKey={props.messageKey}
+                        options={props.options}
+                        onOpenSidebar={props.onOpenSidebar}
+                      />
+                    </Match>
+                  </Switch>
+                  <Show
+                    when={
+                      state().sourceRole === "assistant" &&
+                      assistantMessageIsInterrupted(state().message)
+                    }
+                  >
+                    <div
+                      class="chat-tasks-status chat-turn-recap chat-turn-recap--continuation"
+                      role="status"
+                    >
+                      {t("chat.composer.runInterrupted")}
+                    </div>
+                  </Show>
+                  <Show
+                    when={state().duplicateCount > 1 && (!state().markdown || state().jsonResult)}
+                  >
+                    <div
+                      class="chat-duplicate-count"
+                      aria-label={t("chat.messages.duplicatesCollapsed", {
+                        count: String(state().duplicateCount),
+                      })}
+                    >
+                      ×{state().duplicateCount}
+                    </div>
+                  </Show>
+                </div>
+                <MessageWorkContext message={state().message} />
+              </>
+            );
+          }}
         </Show>
       }
     >
@@ -229,11 +242,10 @@ function InlineToolCards(props: {
 }
 
 function PairingQrNotices(props: { count: number }) {
-  const count = createMemo(() => props.count);
   return (
-    <Show when={count() > 0}>
+    <Show when={props.count > 0}>
       <div class="chat-pairing-qr-notices">
-        <For each={Array.from({ length: count() }, (_, index) => index)}>
+        <Repeat count={props.count}>
           {() => (
             <div class="chat-assistant-attachment-card chat-assistant-attachment-card--blocked chat-pairing-qr-expired">
               <span class="chat-pairing-qr-expired__icon" aria-hidden="true">
@@ -254,7 +266,7 @@ function PairingQrNotices(props: { count: number }) {
               </div>
             </div>
           )}
-        </For>
+        </Repeat>
       </div>
     </Show>
   );
@@ -268,29 +280,41 @@ function AssistantViews(props: ContentProps) {
   return (
     <Show when={props.state().sourceRole === "assistant"}>
       <For each={props.state().assistantViewBlocks} keyed={false}>
-        {(block) => (
-          <div class="chat-tool-card__widget-host">
-            <ToolPreview
-              preview={block().preview}
-              surface="chat_message"
-              options={{
-                rawText: block().rawText ?? null,
-                canvasPluginSurfaceUrl: props.options.canvasPluginSurfaceUrl,
-                boardProvider: props.options.boardProvider,
-                widgetLayout: props.options.widgetLayout,
-                embedSandboxMode: props.options.embedSandboxMode ?? "scripts",
-                allowExternalEmbedUrls: props.options.allowExternalEmbedUrls,
-                sessionKey: props.options.sessionKey,
-                messageTimestamp: messageTimestamp(),
-              }}
-            />
-            <Show when={block().rawText}>
-              <div class="chat-tool-card__widget-raw">
-                <ChatToolRawOutput text={block().rawText!} style={{ display: "contents" }} />
-              </div>
-            </Show>
-          </div>
-        )}
+        {(block) => {
+          let rawToggle: HTMLButtonElement | undefined;
+          return (
+            <div class="chat-tool-card__widget-host">
+              <ToolPreview
+                preview={block().preview}
+                surface="chat_message"
+                options={{
+                  rawText: block().rawText ?? null,
+                  toggleRawDetails: () => {
+                    const open = rawToggle?.getAttribute("aria-expanded") !== "true";
+                    rawToggle?.click();
+                    return Boolean(rawToggle && open);
+                  },
+                  canvasPluginSurfaceUrl: props.options.canvasPluginSurfaceUrl,
+                  boardProvider: props.options.boardProvider,
+                  widgetLayout: props.options.widgetLayout,
+                  embedSandboxMode: props.options.embedSandboxMode ?? "scripts",
+                  allowExternalEmbedUrls: props.options.allowExternalEmbedUrls,
+                  sessionKey: props.options.sessionKey,
+                  messageTimestamp: messageTimestamp(),
+                }}
+              />
+              <Show when={block().rawText}>
+                <div class="chat-tool-card__widget-raw">
+                  <ChatToolRawOutput
+                    text={block().rawText!}
+                    toggleRef={(element) => (rawToggle = element)}
+                    style={{ display: "contents" }}
+                  />
+                </div>
+              </Show>
+            </div>
+          );
+        }}
       </For>
     </Show>
   );
@@ -364,12 +388,12 @@ function MessageText(props: ContentProps) {
 }
 
 function MessageAvatar(props: { render?: () => JSX.Element }) {
-  const render = createMemo(() => props.render);
-  const avatar = createMemo(() => {
-    const factory = render();
-    return factory ? untrack(factory) : undefined;
-  });
-  return <>{avatar()}</>;
+  // Replacing the factory retires its bindings; updates inside it stay with its owner.
+  return (
+    <Show when={props.render} keyed>
+      {(render) => render()}
+    </Show>
+  );
 }
 
 function VideoPreview(props: ContentProps & { item: Accessor<AttachmentItem | undefined> }) {

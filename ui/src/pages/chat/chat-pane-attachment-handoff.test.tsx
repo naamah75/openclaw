@@ -35,6 +35,7 @@ import {
 import { createChatState } from "./chat-state-controller.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
 import type { ChatAttachmentControlsProps } from "./components/chat-attachment-controls.types.ts";
+import { createChatAttachmentInputHandle } from "./components/chat-attachment-inputs.ts";
 import { ChatAttachmentInputs } from "./components/chat-attachment-inputs.tsx";
 import { AttachmentPreview } from "./components/chat-attachments.tsx";
 import { reviewPrivateComposerDraft } from "./components/private-composer-recovery-dialog.tsx";
@@ -125,12 +126,12 @@ describe("cross-region Home composer ownership", () => {
     current.connected = false;
     const persistence = new ChatComposerPersistence(() => current);
     const controller = createChatState<ChatPageHost>({
-      invalidate: () => {},
-      updateComplete: Promise.resolve(true),
+      awaitDomCommit: async () => true,
     });
     current.canRestoreComposer = () => persistence.active;
     const notify = vi.fn(() => persistence.persistChangedState());
-    current.requestUpdate = notify;
+    const unsubscribeDraft = controller.composerDraft.subscribe(notify);
+    current.composerDraftChanged = notify;
     persistence.start();
     const unsubscribe = chatOutboxOwner(current).subscribe(current);
     const view = { presented: true, owner };
@@ -154,6 +155,7 @@ describe("cross-region Home composer ownership", () => {
     disposals.push(() => {
       handoff.dispose();
       unsubscribe();
+      unsubscribeDraft();
       persistence.stop();
       controller.dispose();
       discardStateStagedAttachments(current);
@@ -227,11 +229,12 @@ describe("cross-region Home composer ownership", () => {
       const { context, owner, page } = fixture;
       page.edit("Keep this draft and file");
       const container = document.createElement("div");
+      const inputHandle = createChatAttachmentInputHandle();
       const view = mountSolid(
         (props: { controls: ChatAttachmentControlsProps; showInputs: boolean }) => (
           <>
             <Show when={props.showInputs}>
-              <ChatAttachmentInputs {...props.controls} />
+              <ChatAttachmentInputs {...props.controls} inputHandle={inputHandle} />
             </Show>
             <AttachmentPreview {...props.controls} />
           </>
@@ -480,7 +483,7 @@ describe("cross-region Home composer ownership", () => {
 
     // Relinquished persistence cannot overwrite the current presentation's edit.
     page.current.chatMessage = "stale retained draft";
-    page.current.requestUpdate();
+    page.current.composerDraftChanged?.();
     expect(loadChatComposerState(dock.current, sessionKey).snapshot?.draft).toBe(
       "Edited in the dock",
     );
@@ -575,10 +578,9 @@ describe("staged chat attachment pane handoff", () => {
   }
 
   function retainedSessions(context: ApplicationContext, ...panes: HTMLElement[]) {
-    const host = Object.assign(document.createElement("div"), { requestUpdate: () => {} });
+    const host = document.createElement("div");
     host.append(...panes);
     return new ChatPageRetainedSessions(host, {
-      invalidate: () => host.requestUpdate(),
       context: () => context,
       presented: () => true,
       routeHref: () => window.location.href,

@@ -794,12 +794,12 @@ const enSettings = {
       retryDiscover: "Retry",
       thinkingHelpLabel: "About thinking defaults",
       thinkingHelp:
-        "Sets the global default for new sessions when no session-specific thinking level is set. OpenClaw maps unsupported levels to the closest option supported by the selected model.",
+        "Sets the global default for new sessions when no session-specific thinking level is set. Choices follow the primary model's reported capabilities. A saved level stays visible if the model changes; other models map unsupported levels to their closest supported option.",
       thinkingDefaultHelp:
         "Uses the selected model's thinking policy instead of saving a global thinking override.",
       fastModeHelpLabel: "About fast mode defaults",
       fastModeHelp:
-        "Sets the global default for new sessions. Auto starts in fast mode and returns to standard mode after the model's configured interval; On and Off keep that behavior fixed.",
+        "Sets the global default for new sessions. Auto starts fast and returns to standard after the model's configured interval. On requests fast mode, Off requests standard, and Ultrafast requests the Ultrafast service tier when available. Saved preferences remain unchanged when capabilities change.",
       fastModeDefaultHelp:
         "Uses the selected model's fast-mode policy. Unlike Auto, Default does not enable fast mode by itself.",
     },
@@ -1588,27 +1588,6 @@ const enSettings = {
       settings: "Settings",
     },
 
-    memories: {
-      searchLabel: "Search memories",
-      searchPlaceholder: "Search this agent's memories",
-      searchButton: "Search",
-      idle: "Search for a person, project, decision, or anything else this agent remembers.",
-      searching: "Searching memories…",
-      results: "{count} results",
-      empty: "No memories matched “{query}”.",
-      error: "Memory search failed: {message}",
-      retry: "Retry",
-      gatewayUpdateRequired: "Update the gateway to search memories from the Control UI.",
-      hybridSearch: "hybrid search",
-      keywordSearch: "keyword search",
-      lineRange: "lines {start}–{end}",
-      score: "score {score}",
-      sourceMemory: "memory",
-      sourceSessions: "sessions",
-      fileLoading: "Loading the full memory file…",
-      fileError: "Could not load this memory file: {message}",
-      fileUnsupported: "This memory file cannot be shown as text.",
-    },
     engine: {
       title: "Engine",
       description:

@@ -1,8 +1,10 @@
 import type { SessionCatalog } from "../../../packages/gateway-protocol/src/index.ts";
+import { roleScopesAllow } from "../../../src/shared/operator-scope-compat.js";
 import type { GatewayBrowserClient } from "../api/gateway.ts";
 import type { GatewaySessionRow, SessionsListResult } from "../api/types.ts";
 import { isSessionRouteId } from "../app-route-paths.ts";
 import type { ApplicationContext } from "../app/context.ts";
+import { gatewayPresentationScope } from "../app/gateway-presentation-scope.ts";
 import { readPresenceEntries, type PresencePayload } from "../app/user-profile.ts";
 import { rosterActivityStore } from "../lib/agents/roster-activity-store.ts";
 import { formatUiError } from "../lib/format-error.ts";
@@ -54,7 +56,7 @@ import {
   subscribeSessionDataGatewayEvents,
   subscribeSessionCatalogBrowserEvents,
 } from "./session-data-events.ts";
-import { SessionLineageController } from "./session-lineage-controller.ts";
+import { SessionLineageOwner } from "./session-lineage.ts";
 import { SidebarOwnerSessionCounts } from "./sidebar-owner-session-counts.ts";
 
 /** Gateway-backed session-list and external-catalog data ownership. */
@@ -112,7 +114,11 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
   // Retiring the epoch aborts it so a dialog open across a reconnect dismisses
   // itself instead of confirming into a mutation scope that no longer applies.
   private sessionMutationAbortController = new AbortController();
-  private readonly lineage = new SessionLineageController(
+  // Editable dialogs belong to the identity, not to a socket request epoch.
+  private sessionDraftAbortController = new AbortController();
+  private sessionDraftOwner: number | undefined;
+  private sessionDraftAuth: { role?: string; scopes?: readonly string[] } | undefined;
+  private readonly lineage = new SessionLineageOwner(
     this,
     () => ({ routeId: this.inputs.activeRouteId, key: this.inputs.getRouteSessionKey() }),
     () => this.childSessionScope,
@@ -147,10 +153,10 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
       subscribeSessionDataGatewayEvents(gateway, this),
       subscribeSidebarAgentSessionCaches(agents, this, this.requestSessionDataUpdate),
       agentSelection.subscribe(() => this.synchronizeSessionScope()),
-      subscribeSessionCatalogBrowserEvents(
-        this.handleCatalogSessionContinued as EventListener,
-        this.handleSessionCatalogPageActivation,
-      ),
+      subscribeSessionCatalogBrowserEvents((event) => {
+        const { detail } = event as CustomEvent<CatalogSessionContinuedDetail>;
+        applySessionCatalogContinuation(this, detail);
+      }, this.handleSessionCatalogPageActivation),
     );
     this.synchronizeSessionScope();
     return () => stops.forEach((stop) => stop());
@@ -186,6 +192,10 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
     this.inputs.sessionCatalogIdsWithoutVisibleRows();
 
   readonly requestSessionDataUpdate = () => {
+    const roster = this.roster?.snapshot;
+    if (roster) {
+      publishSidebarSessionList(this, { ...roster, agentId: null });
+    }
     if (!this.active || !this.inputs.navigationVisible || this.renderFrame !== undefined) {
       return;
     }
@@ -238,10 +248,15 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
       this.inputs.sidebarAgentsMode === "roster" && this.sessionLineageVisible && this.context
         ? rosterActivityStore(this.context)
         : undefined;
+    roster?.setInvolvingMe(this.inputs.sidebarSessionOwnerFilter().involvingMe);
     if (roster !== this.roster) {
       this.stopRoster?.();
+      this.roster?.setInvolvingMe(false);
       this.roster = roster;
       this.stopRoster = roster?.subscribe(this.requestSessionDataUpdate);
+      this.updateSessions(this.context.sessions);
+      this.requestSessionDataUpdate();
+      void this.scheduleSidebarSessions();
     }
     this.lineage.synchronize();
     const scope = this.readPresentationScope();
@@ -256,7 +271,7 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
     return [
       this.inputs.navigationVisible,
       this.inputs.navigationView,
-      this.inputs.contextualSidebar,
+      Boolean(this.inputs.contextualSidebar),
       this.inputs.sidebarAgentsMode,
       this.inputs.connected,
       this.filteredSessionScope,
@@ -294,6 +309,7 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
     this.stopSources = undefined;
     this.stopRoster?.();
     this.stopRoster = undefined;
+    this.roster?.setInvolvingMe(false);
     this.roster = undefined;
     // A provider replacement releases the view while retaining its sidebar owner.
     if (retainOwner) {
@@ -305,6 +321,8 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
     this.sessionsSource = null;
     this.inputs.dismissTransientMenus();
     this.invalidateSessionMutations();
+    this.retireSessionDrafts();
+    this.sessionDraftAuth = undefined;
     this.gatewaySource = null;
     this.gatewayClient = null;
     this.gatewayConnected = false;
@@ -387,6 +405,7 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
 
     if (
       agentChanged &&
+      this.inputs.sidebarAgentsMode !== "roster" &&
       context?.gateway.snapshot.phase === "connected" &&
       hasSidebarListFilter(this.inputs)
     ) {
@@ -395,12 +414,6 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
   }
 
   handleSessionCatalogHostEvent = applySessionCatalogHostEventToData.bind(null, this);
-
-  private readonly handleCatalogSessionContinued = (
-    event: CustomEvent<CatalogSessionContinuedDetail>,
-  ) => {
-    applySessionCatalogContinuation(this, event.detail);
-  };
 
   private readonly handleSessionCatalogPageActivation = () => scheduleSessionCatalogRefresh(this);
 
@@ -447,7 +460,7 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
       this.lineage.reset(true);
       this.requestSessionDataUpdate();
     }
-    if (hasSidebarListFilter(this.inputs)) {
+    if (this.roster || hasSidebarListFilter(this.inputs)) {
       return;
     }
     const presentation = sessions.presentation;
@@ -455,7 +468,6 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
       this.clearSessionCache();
     }
     publishSidebarSessionList(this, { ...snapshot, ...presentation });
-    this.sessionsLoading = snapshot.loading;
     this.requestSessionDataUpdate();
   };
 
@@ -463,6 +475,7 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
     const sourceChanged = sessions !== this.sessionsSource;
     if (sourceChanged) {
       this.invalidateSessionMutations();
+      this.retireSessionDrafts();
       this.retireFilteredSessions();
       this.clearSessionCache();
       this.sessionsSource = sessions;
@@ -480,6 +493,25 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
 
   private synchronizeGateway(gateway: ApplicationContext["gateway"]): void {
     this.lineage.synchronize();
+    const draftOwner = gatewayPresentationScope(gateway).key;
+    const auth = gateway.snapshot.phase === "connected" ? gateway.snapshot.hello?.auth : undefined;
+    if (
+      (this.sessionDraftOwner !== undefined && this.sessionDraftOwner !== draftOwner) ||
+      (auth &&
+        auth !== this.sessionDraftAuth &&
+        this.sessionDraftAuth?.scopes &&
+        !roleScopesAllow({
+          role: auth.role ?? "operator",
+          requestedScopes: this.sessionDraftAuth.scopes,
+          allowedScopes: auth.scopes ?? [],
+        }))
+    ) {
+      this.retireSessionDrafts();
+    }
+    this.sessionDraftOwner = draftOwner;
+    if (auth) {
+      this.sessionDraftAuth = auth;
+    }
     const client = gateway.snapshot.client;
     const connected = gateway.snapshot.phase === "connected";
     const sessionSourceChanged =
@@ -504,6 +536,9 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
       return;
     }
     this.invalidateSessionMutations();
+    if (sourceOrClientChanged) {
+      this.retireSessionDrafts();
+    }
     this.ownerCounts.dispose();
     this.resetChildSessionState(true);
     this.gatewaySource = gateway;
@@ -551,7 +586,11 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
 
   private bindFilteredSessions(): void {
     const sessions = this.context?.sessions;
-    if (!sessions || !hasSidebarListFilter(this.inputs)) {
+    if (
+      !sessions ||
+      this.inputs.sidebarAgentsMode === "roster" ||
+      !hasSidebarListFilter(this.inputs)
+    ) {
       this.retireFilteredSessions();
       return;
     }
@@ -576,6 +615,9 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
   }
 
   refreshSidebarSessions(affectedAgentId?: string): Promise<void> {
+    if (this.inputs.sidebarAgentsMode === "roster") {
+      return rosterActivityStore(this.context).refresh();
+    }
     this.bindFilteredSessions();
     return refreshSidebarSessionList(this, { affectedAgentId });
   }
@@ -723,6 +765,15 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
     this.requestSessionDataUpdate();
   }
 
+  get sessionDraftSignal(): AbortSignal {
+    return this.sessionDraftAbortController.signal;
+  }
+
+  private retireSessionDrafts(): void {
+    this.sessionDraftAbortController.abort();
+    this.sessionDraftAbortController = new AbortController();
+  }
+
   beginSessionMutation(): SidebarSessionMutationScope | null {
     const context = this.context;
     if (!context || !this.inputs.connected) {
@@ -733,8 +784,7 @@ export class SessionDataOwner implements SessionCatalogDataOwner {
     if (gateway.snapshot.phase !== "connected" || !client) {
       return null;
     }
-    publishSidebarSessionError(this, null, "action");
-    this.requestSessionDataUpdate();
+    this.dismissSessionMutationError();
     return {
       epoch: this.sessionMutationEpoch,
       context,
