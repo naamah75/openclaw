@@ -49,10 +49,17 @@ it.each(["runtime", "runtime-discovery", "maintenance", "legacy"] as const)(
           writer.db.exec("ALTER TABLE agent_deletion_journal DROP COLUMN phase");
         }
       }, options);
+      const journalSelects: string[] = [];
       const reads = trackSqliteStatementExecutions(
         requireNativeSqliteDatabase(database.db),
         ["journal"],
-        (sql) => (/^select\b.*from "agent_deletion_journal"/iu.test(sql) ? "journal" : null),
+        (sql) => {
+          if (!/^select\b.*from "agent_deletion_journal"/iu.test(sql)) {
+            return null;
+          }
+          journalSelects.push(sql);
+          return "journal";
+        },
       );
       try {
         const before = readAgentDatabaseDeletionWorkerSnapshot(database.db, database.path, purpose);
@@ -67,7 +74,12 @@ it.each(["runtime", "runtime-discovery", "maintenance", "legacy"] as const)(
         );
         expect(reads.textBytes.journal).toBeLessThan(4096);
         expect(reads.counts.journal).toBe(1);
+        if (scenario === "legacy") {
+          // A bare bind in the SELECT list has no inferable parameter type on PostgreSQL.
+          expect(journalSelects[0]).toContain('null as "phase"');
+        }
         writeState((writer) => completeJournal(writer, "retained", "delete-retained"), options);
+        const readsBeforeSnapshot = reads.counts.journal;
         const after = readAgentDatabaseDeletionWorkerSnapshot(database.db, database.path, purpose);
         expect(
           Object.fromEntries(after.deletedAgents.map(({ agentId, status }) => [agentId, status])),
@@ -78,7 +90,7 @@ it.each(["runtime", "runtime-discovery", "maintenance", "legacy"] as const)(
         expect(after.retainedDeletions).toMatchObject({
           entries: [{ agentId: "retained", cleanupCompleted: true }],
         });
-        expect(reads.counts.journal).toBe(2);
+        expect(reads.counts.journal - readsBeforeSnapshot).toBe(1);
       } finally {
         reads.restore();
       }

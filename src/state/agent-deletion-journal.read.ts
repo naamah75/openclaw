@@ -142,7 +142,7 @@ export function readRetainedAgentDeletionsFromDatabase(
           .select(
             tableHasColumn(database, "agent_deletion_journal", "phase")
               ? "phase"
-              : eb.val(null).as("phase"),
+              : eb.lit(null).as("phase"),
           )
           // Status-only tombstones must not transfer their retained path payloads.
           .select([
