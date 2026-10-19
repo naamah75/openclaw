@@ -110,11 +110,7 @@ import { readUserPreferences, selectUserPreferenceValues } from "./user-preferen
 import { readUserProfileCommand } from "./user-profile-read.worker.js";
 import { selectResolvedUserProfileMetadataById } from "./user-profiles-internal.js";
 
-export {
-  prepareAcpSessionMetadataRead,
-  loadSubagentSessionListRunsFromSqlite,
-  readStateStream,
-};
+export { prepareAcpSessionMetadataRead, loadSubagentSessionListRunsFromSqlite, readStateStream };
 
 /** Non-metadata query owners load only when the shared worker receives one of their commands. */
 export function readOpenClawStateDatabaseCommand(
