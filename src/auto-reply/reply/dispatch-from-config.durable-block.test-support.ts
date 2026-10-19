@@ -38,8 +38,8 @@ export function registerDurableBlockRoutingTests(): void {
       OriginatingTo: "imessage:+15550001111",
     });
     const replyResolver = async (_ctx: MsgContext, opts?: GetReplyOptions) => {
-      expect(opts?.suppressTyping).toBe(true);
-      expect(opts?.typingPolicy).toBe("internal_webchat");
+      expect(opts?.suppressTyping).toBe(false);
+      expect(opts?.typingPolicy).toBe("auto");
       await requireBlockReplyHandler(opts?.onBlockReply)(
         { text: "Private dashboard update" },
         { deliveryIntentId: "block-reply:v1:codex-app-server:thread-1:turn-1:private" },
@@ -59,7 +59,7 @@ export function registerDurableBlockRoutingTests(): void {
     expect(dispatcher.sendFinalReply).toHaveBeenCalledWith({ text: "Private dashboard final" });
   });
 
-  it.each(["telegram", "discord"])("keeps parent-owned %s replies private", async (provider) => {
+  it.each(["telegram", "discord"])("keeps parent-owned %s blocks private", async (provider) => {
     setNoAbort();
     mocks.routeReply.mockClear();
     installThreadingTestPlugin({ id: "telegram" });
@@ -82,6 +82,7 @@ export function registerDurableBlockRoutingTests(): void {
     });
     const dispatcher = createDispatcher();
     const replyResolver = async (_ctx: MsgContext, opts?: GetReplyOptions) => {
+      expect(opts?.suppressTyping).toBe(true);
       await requireBlockReplyHandler(opts?.onBlockReply)(
         { text: "Private delegated progress" },
         { deliveryIntentId: "block-reply:v1:codex-app-server:thread-1:turn-1:child" },
@@ -104,7 +105,6 @@ export function registerDurableBlockRoutingTests(): void {
 
     expect(mocks.routeReply).not.toHaveBeenCalled();
     expect(dispatcher.sendBlockReply).not.toHaveBeenCalled();
-    expect(dispatcher.sendFinalReply).not.toHaveBeenCalled();
     expect(hookMocks.runner.runReplyDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         originatingChannel: "telegram",

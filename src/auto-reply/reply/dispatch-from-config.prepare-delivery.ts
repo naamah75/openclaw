@@ -76,7 +76,7 @@ export async function prepareDispatchDelivery(state: GatherDispatchRequestReadyS
     const internalWebchatTurn =
       resolvedSurface === INTERNAL_MESSAGE_CHANNEL &&
       (surfaceChannel === INTERNAL_MESSAGE_CHANNEL || !surfaceChannel) &&
-      effectiveExplicitDeliverRoute !== true;
+      !effectiveExplicitDeliverRoute;
     const routeToOriginating = Boolean(
       !suppressAcpChildUserDelivery &&
       !internalWebchatTurn &&
@@ -90,7 +90,7 @@ export async function prepareDispatchDelivery(state: GatherDispatchRequestReadyS
       isInternalWebchatTurn: internalWebchatTurn,
       shouldRouteToOriginating: routeToOriginating,
       shouldSuppressTyping:
-        suppressAcpChildUserDelivery === true ||
+        suppressAcpChildUserDelivery ||
         routeToOriginating ||
         originatingChannel === INTERNAL_MESSAGE_CHANNEL,
     };
