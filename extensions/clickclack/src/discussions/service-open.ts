@@ -42,7 +42,6 @@ type OpenDiscussionParams = {
   account: ResolvedClickClackAccount;
   clientFactory: (account: ResolvedClickClackAccount) => ClickClackClient;
   installationId: string;
-  bindingGenerationFactory: () => string;
   sessionKey: string;
   ensureTimer: () => Promise<void>;
   reconcilePendingOpen: (pending: PendingDiscussionOpen) => Promise<void>;
@@ -302,7 +301,6 @@ export async function openClickClackDiscussionBinding(
       accountId: account.accountId,
       credentialFingerprint,
       destinationIdentity,
-      createGeneration: params.bindingGenerationFactory,
     });
     const generationScope = { runtime, sessionKey, expectedGeneration: bindingGeneration };
     const externalRef = discussionExternalRef(

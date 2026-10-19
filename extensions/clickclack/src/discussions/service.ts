@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { createAsyncLock } from "openclaw/plugin-sdk/async-lock-runtime";
 import type { OpenClawPluginGatewayEvents, PluginRuntime } from "openclaw/plugin-sdk/core";
 import { KeyedAsyncQueue } from "openclaw/plugin-sdk/keyed-async-queue";
@@ -55,12 +54,6 @@ import {
 import { prepareDiscussionSessionEntry } from "./session-authority.js";
 
 const RECONCILE_INTERVAL_MS = 60_000;
-type DiscussionServiceOptions = {
-  clientFactory?: (account: ResolvedClickClackAccount) => ClickClackClient;
-  installationId?: string;
-  bindingGenerationFactory?: () => string;
-  maxRetainedDetachedBindings?: number;
-};
 
 type DiscussionBindingUseResolution = DiscussionBindingAccountResolution | { state: "retargeted" };
 
@@ -70,7 +63,6 @@ export class ClickClackDiscussionService {
   readonly #store: ClickClackDiscussionBindingStore;
   readonly #clientFactory: (account: ResolvedClickClackAccount) => ClickClackClient;
   #installationId: string | undefined;
-  readonly #bindingGenerationFactory: () => string;
   readonly #detachedBindings: DetachedDiscussionBindingRetention;
   readonly #sessionQueue = new KeyedAsyncQueue();
   #scheduler: PluginServiceSchedulerV1 | undefined;
@@ -84,18 +76,15 @@ export class ClickClackDiscussionService {
   #cleanupPromise: Promise<void> | undefined;
   readonly #operations = new Set<Promise<unknown>>();
 
-  constructor(runtime: PluginRuntime, options: DiscussionServiceOptions = {}) {
+  constructor(runtime: PluginRuntime) {
     this.#runtime = runtime;
     this.#store = getClickClackDiscussionBindingStore(runtime);
-    this.#clientFactory =
-      options.clientFactory ??
-      ((account) => createClickClackClient({ baseUrl: account.apiEndpoint, token: account.token }));
-    this.#installationId = options.installationId;
-    this.#bindingGenerationFactory = options.bindingGenerationFactory ?? randomUUID;
+    this.#clientFactory = (account) =>
+      createClickClackClient({ baseUrl: account.apiEndpoint, token: account.token });
     this.#detachedBindings = new DetachedDiscussionBindingRetention({
       runtime,
       store: this.#store,
-      maxRetained: options.maxRetainedDetachedBindings ?? MAX_RETAINED_DETACHED_DISCUSSION_BINDINGS,
+      maxRetained: MAX_RETAINED_DETACHED_DISCUSSION_BINDINGS,
     });
     this.provider = {
       id: "clickclack",
@@ -239,7 +228,6 @@ export class ClickClackDiscussionService {
         account,
         clientFactory: this.#clientFactory,
         installationId: this.#installationId,
-        bindingGenerationFactory: this.#bindingGenerationFactory,
         sessionKey,
         ensureTimer: () => this.#ensureTimer(),
         reconcilePendingOpen: (pending) =>
