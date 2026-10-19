@@ -502,7 +502,11 @@ describe("placement startup Retry", () => {
               message: input.recovery.message,
               idempotencyKey: messageId,
             }),
-            { timeoutMs: GATEWAY_STARTUP_ADMISSION_WAIT_MS, signal: expect.any(AbortSignal) },
+            expect.objectContaining({
+              timeoutMs: GATEWAY_STARTUP_ADMISSION_WAIT_MS,
+              signal: expect.any(AbortSignal),
+              retainSentResultOnAbort: true,
+            }),
           ],
         ]);
         expect(request.mock.calls.some(([method]) => method === "sessions.dispatch")).toBe(false);

@@ -3,8 +3,8 @@ import { tryResolveCronJobEffectiveAgentId } from "../agent-id.js";
 import type { CronSchedulerSnapshot } from "../store/scheduler-actor.types.js";
 import type { CronServiceState } from "./state.js";
 
-export function preparingCronAgentIds(): string[] {
-  return listAgentDatabaseAdmissionRefusals()
+export function preparingCronAgentIds(env: NodeJS.ProcessEnv): string[] {
+  return listAgentDatabaseAdmissionRefusals({ env })
     .filter((refusal) => refusal.code === "agent-database-inspection-pending")
     .map((refusal) => refusal.agentId);
 }
@@ -21,7 +21,7 @@ export async function captureCronSchedulerSnapshot(
   return {
     config: {
       cronEnabled: state.deps.cronEnabled,
-      preparingAgentIds: preparingCronAgentIds(),
+      preparingAgentIds: preparingCronAgentIds(state.deps.env),
       cronConfig: state.deps.cronConfig,
       defaultAgentId: preparedOwner
         ? preparedOwner.defaultAgentId

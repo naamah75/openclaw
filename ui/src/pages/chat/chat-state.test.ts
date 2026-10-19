@@ -2861,10 +2861,7 @@ describe("chat state render lifecycle", () => {
     const state = createPageState(
       createChatPageStateContext(),
       controller.createRenderLifecycle(),
-      {
-        dispatchEvent: () => true,
-        querySelector: () => null,
-      },
+      document.createElement("div"),
     );
     state.client = createTestGatewayClient((method, params, options) =>
       pending.request(wire, method, params, options),

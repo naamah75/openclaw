@@ -1,3 +1,4 @@
+import path from "node:path";
 import { expect, it, vi } from "vitest";
 import { observeCronJobCommits } from "../../test/helpers/cron/runtime-mutation.js";
 import { createDueIsolatedJob } from "../../test/helpers/cron/service-regression-fixtures.js";
@@ -7,6 +8,7 @@ import {
   withinTest,
 } from "../../test/helpers/promise.js";
 import {
+  createAgentDatabaseInspectionRefusal,
   readAgentDatabaseAdmissionRefusal,
   recordAgentDatabaseAdmissions,
 } from "../state/agent-database-admission.js";
@@ -151,7 +153,7 @@ it("finishes cron initialization while missed command jobs await their agents", 
 });
 
 it.for(["manual", "scheduled"] as const)(
-  "keeps eight preparing-agent jobs queued while a healthy agent runs: %s",
+  "keeps service-scoped preparing jobs queued while a healthy agent runs: %s",
   async (source, { signal }) => {
     const { storePath } = await makeStorePath();
     const slowJobs = Array.from({ length: 8 }, (_, index) => ({
@@ -162,7 +164,10 @@ it.for(["manual", "scheduled"] as const)(
     await saveCronStore(storePath, { version: 1, jobs: [...slowJobs, healthyJob] });
     await withAgentDatabaseStartupAdmission(async (admission) => {
       const inspection = createDeferred<OpenClawDatabaseSchemaPreflight>();
-      const env = { ...process.env };
+      const env = {
+        ...process.env,
+        OPENCLAW_STATE_DIR: path.join(path.dirname(storePath), "admission-state"),
+      };
       const refusal = admission.defer({
         env,
         inspections: [
@@ -189,6 +194,7 @@ it.for(["manual", "scheduled"] as const)(
       const healthyRelease = createDeferred();
       const ran: string[] = [];
       const { cron, state } = createCronServiceWithStateForTest({
+        env,
         scheduler: createTestGatewayScheduler(),
         nowMs: () => NOW,
         storePath,
@@ -238,6 +244,11 @@ it.for(["manual", "scheduled"] as const)(
         ).toBe(true);
         await withinTest(healthyStarted.promise, signal);
         expect(ran).toEqual([healthyJob.id]);
+        // A different service can still be preparing the same agent id.
+        recordAgentDatabaseAdmissions(
+          refusal.map((entry) => createAgentDatabaseInspectionRefusal({ ...entry, pending: true })),
+          { source: "startup" },
+        );
         healthyRelease.resolve();
         inspection.resolve({ incompatible: [], indeterminate: [] });
         await withinTest(completed, signal);
@@ -247,6 +258,7 @@ it.for(["manual", "scheduled"] as const)(
         inspection.resolve({ incompatible: [], indeterminate: [] });
         cron.stop();
         await Promise.all([cron.waitForIdle(), lifetime.stop()]);
+        recordAgentDatabaseAdmissions([], { source: "startup" });
       }
     });
   },

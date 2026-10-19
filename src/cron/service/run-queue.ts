@@ -323,7 +323,7 @@ export async function drainCronRunQueue(state: CronServiceState): Promise<void> 
             defaultAgentId: resolveCurrentDefaultAgentId(state),
             maxConcurrentRuns: DEFAULT_CRON_MAX_CONCURRENT_RUNS,
             schedulingPaused: state.schedulingPaused,
-            preparingAgentIds: preparingCronAgentIds(),
+            preparingAgentIds: preparingCronAgentIds(state.deps.env),
             requests: getCronRunQueueRequests(state, { includePendingEvents: true }),
           },
         }),
@@ -456,6 +456,7 @@ export async function launchCronRunQueueResult(
               if (preparation) {
                 try {
                   await waitForAgentDatabasePreparation(preparation.agentId, {
+                    env: state.deps.env,
                     signal: AbortSignal.any([
                       state.schedulerScope.signal,
                       preparation.controller.signal,
@@ -466,7 +467,7 @@ export async function launchCronRunQueueResult(
                   preparation.controller.abort();
                   throw error;
                 }
-                assertAgentDatabaseAdmitted(preparation.agentId);
+                assertAgentDatabaseAdmitted(preparation.agentId, { env: state.deps.env });
                 // A stale readiness snapshot can settle immediately; wake after this drain unlocks.
                 await state.op;
               } else {

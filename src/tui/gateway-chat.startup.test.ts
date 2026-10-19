@@ -221,9 +221,11 @@ describe("TUI startup admission", () => {
     });
     await vi.advanceTimersByTimeAsync(0);
     expect(fixture.writes).toHaveLength(2);
+    const firstWrite = fixture.writes[0];
+    assert(firstWrite);
     expect(fixture.writes.map((frame) => (frame.params as { key: string }).key)).toEqual([
-      (fixture.writes[0].params as { key: string }).key,
-      (fixture.writes[0].params as { key: string }).key,
+      (firstWrite.params as { key: string }).key,
+      (firstWrite.params as { key: string }).key,
     ]);
     await vi.advanceTimersByTimeAsync(GATEWAY_STARTUP_ADMISSION_WAIT_MS - 240_000);
     expect(settled).toBe(true);

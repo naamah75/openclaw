@@ -1,5 +1,7 @@
-import { GatewayClientRequestTimeoutError } from "../../packages/gateway-client/src/client.js";
-import { GatewayClientRequestError } from "../../packages/gateway-client/src/request-error.js";
+import {
+  GatewayClientRequestError,
+  GatewayClientRequestTimeoutError,
+} from "../../packages/gateway-client/src/request-error.js";
 import { GATEWAY_STARTUP_ADMISSION_WAIT_MS } from "../../packages/gateway-protocol/src/startup-unavailable.js";
 import type { GatewayClient } from "../gateway/client.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
