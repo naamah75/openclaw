@@ -183,15 +183,9 @@ export async function runBtwSideQuestion(
     const resolveRuntimeSelection = async () => {
       if (!runtimeSelection) {
         runtimeSelection = await resolveRuntimeModel({
+          ...params,
           abortSignal: params.opts?.abortSignal,
-          provider: params.provider,
-          model: params.model,
           agentId: sessionAgentId,
-          sessionEntry: params.sessionEntry,
-          sessionStore: params.sessionStore,
-          sessionKey: params.sessionKey,
-          storePath: params.storePath,
-          isNewSession: params.isNewSession,
           harnessId: harness.id,
           harnessAuthBootstrap: harness.authBootstrap,
           preparedModelRuntime,
@@ -371,6 +365,7 @@ export async function runBtwSideQuestion(
         agentId: sessionAgentId,
         sessionId,
         runtimeModel,
+        nativeOwnership: runtime.nativeOwnership,
         sandbox,
       });
       const preparedRunAdmission = prepareSystemAgentRunAdmission(

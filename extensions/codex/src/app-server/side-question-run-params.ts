@@ -4,7 +4,7 @@ import type {
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import type { CodexEffectiveSessionPermissionPolicy } from "./session-permission-policy.js";
 
-/** Side runs inherit the native binding's model without carrying outer model metadata. */
+/** Keep prepared metadata only when it belongs to the native binding's model. */
 export function applySideQuestionModelSelection(
   params: AgentHarnessSideQuestionParamsV2,
   selection: { model: string; modelProvider: string } | undefined,
@@ -14,16 +14,20 @@ export function applySideQuestionModelSelection(
         ...params,
         provider: selection.modelProvider,
         model: selection.model,
-        runtimeModel: {
-          id: selection.model,
-          name: selection.model,
-          provider: selection.modelProvider,
-          api: "openai-chatgpt-responses",
-          reasoning: true,
-          input: ["text", "image"],
-          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-          // SAFETY: native side runs consume binding capabilities, not generic model token limits.
-        } as NonNullable<AgentHarnessSideQuestionParamsV2["runtimeModel"]>,
+        runtimeModel:
+          params.runtimeModel?.id === selection.model &&
+          params.runtimeModel.provider === selection.modelProvider
+            ? params.runtimeModel
+            : ({
+                id: selection.model,
+                name: selection.model,
+                provider: selection.modelProvider,
+                api: "openai-chatgpt-responses",
+                reasoning: true,
+                input: ["text", "image"],
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+                // SAFETY: native side runs consume binding capabilities, not generic model token limits.
+              } as NonNullable<AgentHarnessSideQuestionParamsV2["runtimeModel"]>),
       }
     : params;
 }

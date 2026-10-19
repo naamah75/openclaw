@@ -74,6 +74,11 @@ Retry after the native session selects a model to prepare its search policy.
 Missing prepared policy also disables hosted search; Codex does not resolve it
 later while building native tools.
 
+When a binding preserves its native model, `/btw` prepares model, credentials,
+and search policy for that bound provider and model, even if the chat's outer
+model differs. A native model change after preparation rejects the side question
+before dispatch; retry to prepare for the current model.
+
 `sessions_yield`, `sessions_spawn`, and message-tool-only source replies stay
 direct because they are turn-control or delegation contracts. Guidance uses
 Codex's native `spawn_agent` for work using only Codex-native tools. New work

@@ -28,7 +28,7 @@ import {
   resolvePluginHarnessPolicyToolsAllow,
 } from "./harness/execution-environment.js";
 import { readSessionRuntimeOwnershipAsync } from "./harness/session-runtime-ownership.js";
-import type { AgentHarness } from "./harness/types.js";
+import type { AgentHarness, AgentHarnessSessionRuntimeOwnership } from "./harness/types.js";
 import type { ImageSanitizationLimits } from "./image-sanitization.js";
 import {
   ensureAuthProfileStoreAsync,
@@ -307,6 +307,7 @@ export async function resolveBtwPreparedRuntimeAuth(
 
 export async function resolveRuntimeModel(params: {
   abortSignal?: AbortSignal;
+  assertCurrent?: () => void;
   provider: string;
   model: string;
   agentId: string;
@@ -326,11 +327,15 @@ export async function resolveRuntimeModel(params: {
   runtimeAuthPreparation: BtwRuntimeAuthPreparation;
   authStorage: PreparedModelRuntimeStores["authStorage"];
   modelRegistry: PreparedModelRuntimeStores["modelRegistry"];
+  nativeOwnership?: AgentHarnessSessionRuntimeOwnership;
 }> {
   const preparedModelRuntime = params.preparedModelRuntime;
   const { config: cfg, agentDir, workspaceDir } = preparedModelRuntime;
+  // Model, credentials, and tool policy must share the native owner's prepared tuple.
+  const nativeOwnership = await readSessionRuntimeOwnershipAsync({ ...params, config: cfg });
+  const modelRef = nativeOwnership?.modelRef ?? params;
   const { authStorage, modelRegistry } = preparedModelRuntime.createStores();
-  const resolution = await resolveModelAsync(params.provider, params.model, agentDir, cfg, {
+  const resolution = await resolveModelAsync(modelRef.provider, modelRef.model, agentDir, cfg, {
     abortSignal: params.abortSignal,
     authStorage,
     modelRegistry,
@@ -344,7 +349,7 @@ export async function resolveRuntimeModel(params: {
   });
   let model = resolution.model;
   if (!model) {
-    throw new Error(resolution.error ?? `Unknown model: ${params.provider}/${params.model}`);
+    throw new Error(resolution.error ?? `Unknown model: ${modelRef.provider}/${modelRef.model}`);
   }
   const runtimeProvider = model.provider;
   const runtimeModelId = model.id;
@@ -391,6 +396,7 @@ export async function resolveRuntimeModel(params: {
     runtimeAuthPreparation,
     authStorage,
     modelRegistry,
+    nativeOwnership,
   };
 }
 
@@ -451,10 +457,10 @@ export async function prepareBtwHarnessToolPolicies(
   params: RunBtwSideQuestionParams & {
     sessionId: string;
     runtimeModel: Model;
+    nativeOwnership?: AgentHarnessSessionRuntimeOwnership;
     sandbox: SandboxContext | null;
   },
 ) {
-  const nativeOwnership = await readSessionRuntimeOwnershipAsync({ ...params, config: params.cfg });
   const policies = await preparePluginHarnessToolPolicies(
     {
       ...params,
@@ -464,8 +470,8 @@ export async function prepareBtwHarnessToolPolicies(
     },
     undefined,
     undefined,
-    nativeOwnership
-      ? (nativeOwnership.modelRef ?? null)
+    params.nativeOwnership
+      ? (params.nativeOwnership.modelRef ?? null)
       : { provider: params.runtimeModel.provider, model: params.runtimeModel.id },
   );
   return {
