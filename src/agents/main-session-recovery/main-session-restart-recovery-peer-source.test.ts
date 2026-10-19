@@ -30,6 +30,65 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+it.each(["exact", "legacy"] as const)(
+  "restores the %s peer source when the recovery run ID is also a legacy transcript key",
+  async (selected) => {
+    await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+      const storePath = state.statePath("agents", "main", "sessions", "sessions.json");
+      const endpoint = (name: string) => ({
+        agentId: "main",
+        sessionKey: `agent:main:${name}`,
+        sessionId: `${name}-session`,
+        lifecycleRevision: `${name}-generation`,
+        storePath,
+      });
+      const legacy = endpoint("legacy-source");
+      const exact = endpoint("exact-source");
+      const target = endpoint("collision-target");
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { workspace: state.workspaceDir }, entries: { main: {} } },
+        session: { store: storePath, communication: { send: "always", receive: "always" } },
+        tools: { sessions: { visibility: "all" } },
+      };
+      setRuntimeConfigSnapshot(cfg);
+      await seedConsumedPeerRestartInput({ cfg, source: legacy, target, runId: "foo" });
+      if (selected === "exact") {
+        await seedConsumedPeerRestartInput({ cfg, source: exact, target, runId: "foo:user" });
+      }
+      const recovered = expectDefined(
+        await prepareConsumedSessionSendSource({
+          config: cfg,
+          target,
+          sourceRunId: "foo:user",
+          assertCurrent() {},
+        }),
+        "selected peer source",
+      );
+      try {
+        if (selected === "exact") {
+          await updateSessionEntry(legacy, () => ({ communication: { send: "never" } }));
+          expect(() => recovered.source()).not.toThrow();
+          await updateSessionEntry(legacy, () => ({ communication: { send: "always" } }));
+        }
+        await updateSessionEntry(selected === "exact" ? exact : legacy, () => ({
+          communication: { send: "never" },
+        }));
+        expect(() => recovered.source()).toThrow();
+        expect(
+          await prepareConsumedSessionSendSource({
+            config: cfg,
+            target,
+            sourceRunId: "foo:user",
+            assertCurrent() {},
+          }),
+        ).toBeUndefined();
+      } finally {
+        recovered.release();
+      }
+    });
+  },
+);
+
 it.each(["permission", "replacement"] as const)(
   "keeps consumed peer authority through committed compaction without bypassing %s revocation",
   async (revocation) => {

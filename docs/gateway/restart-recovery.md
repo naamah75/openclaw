@@ -133,6 +133,8 @@ reruns the sender task or restores old approvals.
 
 If an accepted peer input was already consumed by a turn when the Gateway died,
 main-session recovery uses its saved delivery source to resume that turn. It checks
+the exact interrupted run's delivery before falling back to an older transcript key;
+an older delivery cannot override an existing exact match. Recovery checks
 the original endpoints and current communication permissions again, including
 after another forced restart. Recovered execution retains these checks for tool
 effects, so revoking communication permission stops further effects. Its authority

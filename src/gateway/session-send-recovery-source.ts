@@ -132,7 +132,8 @@ export async function prepareConsumedSessionSendSource(params: {
   signal?: AbortSignal;
 }): Promise<{ source: SessionSourceAssertion; release: () => void } | undefined> {
   const runKey = buildRunUserTurnIdempotencyKey(params.sourceRunId);
-  const keys = params.sourceRunId.endsWith(":user") ? [params.sourceRunId, runKey] : [runKey];
+  // An exact run's envelope must win over an older run's matching transcript key.
+  const keys = params.sourceRunId.endsWith(":user") ? [runKey, params.sourceRunId] : [runKey];
   for (const key of keys) {
     const retained = await readPendingInputSource(params.target, key, false);
     const snapshot = retained?.snapshot;
