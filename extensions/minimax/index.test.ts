@@ -15,7 +15,7 @@ import {
 import { MINIMAX_OAUTH_MARKER } from "openclaw/plugin-sdk/provider-auth";
 import { clearLiveCatalogCacheForTests } from "openclaw/plugin-sdk/provider-catalog-live-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerMinimaxProviders } from "./provider-registration.js";
+import minimaxPlugin from "./index.js";
 
 const m31Model: Model<"anthropic-messages"> = {
   id: "MiniMax-M3.1-Flash-Preview",
@@ -41,13 +41,9 @@ vi.mock("./oauth.runtime.js", async (importOriginal) => ({
   })),
 }));
 
-const minimaxProviderPlugin = {
-  register: registerMinimaxProviders,
-};
-
 async function registeredProviders() {
   const { providers } = await registerProviderPlugin({
-    plugin: minimaxProviderPlugin,
+    plugin: minimaxPlugin,
     id: "minimax",
     name: "MiniMax Provider",
   });
@@ -96,7 +92,7 @@ describe("minimax provider hooks", () => {
       );
       vi.stubGlobal("fetch", fetchMock);
       const { providers } = await registerProviderPlugin({
-        plugin: minimaxProviderPlugin,
+        plugin: minimaxPlugin,
         id: "minimax",
         name: "MiniMax Provider",
       });
@@ -774,7 +770,7 @@ async function registeredProvidersWithPortalBaseUrl(baseUrl: string) {
   const { providers } = await registerProviderPlugin({
     plugin: {
       register: (api: OpenClawPluginApi) =>
-        registerMinimaxProviders({
+        minimaxPlugin.register({
           ...api,
           runtime: {
             ...api.runtime,
